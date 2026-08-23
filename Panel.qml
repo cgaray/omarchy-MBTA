@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell
 import qs.Commons
 import qs.Ui
-import "Mbta.js" as Mbta
+import "PanelActivity.js" as PanelActivity
 
 Panel {
   id: root
@@ -28,39 +28,53 @@ Panel {
   readonly property var configuredStopIds: feed && feed.configuredStopIds ? feed.configuredStopIds : []
   readonly property string activeLineKey: feed ? feed.activeLineKey : ""
   readonly property bool lineVisible: feed ? feed.lineVisible : false
+  readonly property var activity: PanelActivity.derive({
+    loaded: true,
+    opened: root.opened,
+    managing: root.managing,
+    lineSelected: root.lineVisible,
+    sideBySide: boardLayout.sideBySide
+  })
 
-  // The station list downloads in the background; when it lands, re-run
-  // whatever query the user already typed instead of leaving a stale "no match".
-  readonly property bool stationsReady: feed && feed.stationsCache !== null
-  onStationsReadyChanged: {
-    if (root.managing && root.pickerMode === "name" && root.stationQuery !== "")
-      searchDebounce.restart()
+  // Read-only view compatibility over the nonvisual picker state machine.
+  readonly property bool managing: panelSession.managing
+  readonly property string pickerMode: panelSession.pickerMode
+  readonly property string stationQuery: panelSession.stationQuery
+  readonly property var stationResults: panelSession.stationResults
+  readonly property int resultIndex: panelSession.resultIndex
+
+  PanelSession {
+    id: panelSession
+    feed: root.feed
+    preferences: root.feed ? root.feed.mbtaSettings : null
   }
 
-  // ---- Station picker state
-  property bool managing: false
-  property string pickerMode: "name" // "name" | "nearby"
-  property string stationQuery: ""
-  property var stationResults: []
-  property int resultIndex: -1
-
-  Timer {
-    id: searchDebounce
-    interval: 120
-    onTriggered: root.runStationSearch()
+  Connections {
+    target: panelSession
+    function onFocusIntent(target) {
+      Qt.callLater(function() {
+        if (target === "station") stationField.forceActiveFocus()
+        else if (target === "address") addressField.forceActiveFocus()
+        else keyCatcher.forceActiveFocus()
+      })
+    }
   }
 
   function open() {
     openedFromHotkey = false
     setCenterHoverRevealSuppressed(false)
     root.controller.show()
-    if (feed) feed.refreshNow()
+    if (feed) {
+      feed.refreshIfStale()
+    }
   }
 
   function openFromHotkey() {
     openedFromHotkey = true
     root.controller.show()
-    if (feed) feed.refreshNow()
+    if (feed) {
+      feed.refreshIfStale()
+    }
     Qt.callLater(function() {
       if (root.opened) setCenterHoverRevealSuppressed(true)
     })
@@ -68,7 +82,7 @@ Panel {
 
   function close() {
     setCenterHoverRevealSuppressed(false)
-    if (root.managing) stopManaging()
+    if (root.managing) panelSession.stopManaging()
     root.controller.hide()
   }
 
@@ -88,96 +102,6 @@ Panel {
       root.bar.centerHoverRevealSuppressed = value
   }
 
-  function startManaging() {
-    root.managing = true
-    // Resume in whichever mode the user picked last time.
-    var lastMode = feed ? String(feed.readSetting("pickerMode", "") || "") : ""
-    if (lastMode === "nearby" || lastMode === "name") root.pickerMode = lastMode
-    root.stationQuery = ""
-    root.stationResults = []
-    root.resultIndex = -1
-    if (feed && root.pickerMode === "name") feed.ensureStations()
-    Qt.callLater(function() {
-      if (root.pickerMode === "name") stationField.forceActiveFocus()
-      else addressField.forceActiveFocus()
-    })
-  }
-
-  function stopManaging() {
-    root.managing = false
-    root.stationQuery = ""
-    root.stationResults = []
-    root.resultIndex = -1
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-  }
-
-  function setPickerMode(mode) {
-    if (root.pickerMode === mode) return
-    root.pickerMode = mode
-    root.stationQuery = ""
-    root.stationResults = []
-    root.resultIndex = -1
-    if (mode === "name" && feed) feed.ensureStations()
-    Qt.callLater(function() {
-      if (mode === "name") stationField.forceActiveFocus()
-      else addressField.forceActiveFocus()
-    })
-  }
-
-  function runStationSearch() {
-    if (!feed) return
-    root.stationResults = feed.searchStations(root.stationQuery)
-    root.resultIndex = root.stationResults.length > 0 ? 0 : -1
-  }
-
-  function triggerNearbySearch() {
-    if (!feed) return
-    var address = addressField.text
-    var radiusKm = parseRadius()
-    if (address.trim() === "") return useMyLocation()
-
-    var started = feed.findNearby(address, radiusKm)
-    // Remember the commute for next time.
-    if (started) feed.updateSettings({ lastAddress: address, lastRadiusKm: radiusKm, pickerMode: "nearby" })
-  }
-
-  function useMyLocation() {
-    if (!feed) return
-    var radiusKm = parseRadius()
-    feed.useMyLocation(radiusKm)
-    feed.updateSettings({ lastRadiusKm: radiusKm, pickerMode: "nearby" })
-  }
-
-  function parseRadius() {
-    var radiusKm = parseFloat(radiusField.text.replace(",", "."))
-    if (isNaN(radiusKm) || radiusKm <= 0) radiusKm = 1
-    radiusKm = Math.min(20, radiusKm)
-    radiusField.text = String(radiusKm)
-    return radiusKm
-  }
-
-  function activeResultCount() {
-    return root.pickerMode === "name" ? root.stationResults.length : (feed ? feed.nearbyResults.length : 0)
-  }
-
-  function pickResult(at) {
-    if (!feed || at < 0 || at >= activeResultCount()) return
-    var stationId = root.pickerMode === "name"
-      ? root.stationResults[at].id
-      : feed.nearbyResults[at].id
-    feed.toggleStop(stationId)
-    if (root.pickerMode === "name") searchDebounce.restart()
-  }
-
-  function moveResultSelection(delta) {
-    var count = activeResultCount()
-    if (!count) return
-    var next = root.resultIndex + delta
-    if (next < 0) next = 0
-    if (next > count - 1) next = count - 1
-    root.resultIndex = next
-  }
-
   function updatedLabel() {
     if (!feed || feed.lastUpdated.getTime() <= 0) return ""
     return Qt.formatDateTime(feed.lastUpdated, "HH:mm:ss")
@@ -190,7 +114,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(root.lineVisible && !root.managing ? 820 : 430))
+    contentWidth: panel.fittedContentWidth(Style.space(root.lineVisible ? 820 : 430))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -198,10 +122,9 @@ Panel {
       anchors.fill: parent
       onCloseRequested: {
         if (root.managing && root.stationQuery !== "") {
-          root.stationQuery = ""
-          searchDebounce.restart()
+          panelSession.clearStationQuery()
         } else if (root.managing) {
-          root.stopManaging()
+          panelSession.stopManaging()
         } else {
           root.close()
         }
@@ -214,13 +137,13 @@ Panel {
       width: parent.width
       spacing: Style.space(10)
 
-      // ---- Header: brand mark, title, live refresh.
+      // ---- Header: brand, live state, metadata, and primary controls.
       Row {
         width: parent.width
         spacing: Style.space(10)
 
         Rectangle {
-          width: Style.font.heading + Style.space(8)
+          width: Style.space(34)
           height: width
           radius: height / 2
           color: "#DA291C"
@@ -238,39 +161,115 @@ Panel {
 
         Column {
           anchors.verticalCenter: parent.verticalCenter
-          spacing: 1
+          width: Math.max(0, parent.width - x - manageButton.width - refreshButton.width
+            - parent.spacing * 2)
+          spacing: 2
 
-          Text {
-            text: "MBTA"
-            color: root.barForeground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.title
-            font.bold: true
+          Row {
+            spacing: Style.space(7)
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "MBTA"
+              color: root.barForeground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.title
+              font.bold: true
+              font.letterSpacing: 0.4
+            }
+
+            Rectangle {
+              anchors.verticalCenter: parent.verticalCenter
+              width: liveState.implicitWidth + Style.space(13)
+              height: Style.space(18)
+              radius: height / 2
+              color: Qt.alpha(root.scheduledMode ? Color.muted : "#42D392", 0.11)
+              border.width: 1
+              border.color: Qt.alpha(root.scheduledMode ? Color.muted : "#42D392", 0.28)
+
+              Row {
+                id: liveState
+                anchors.centerIn: parent
+                spacing: Style.space(4)
+
+                Rectangle {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(5)
+                  height: width
+                  radius: width / 2
+                  color: root.scheduledMode ? Color.muted : "#42D392"
+                }
+
+                Text {
+                  text: root.loading ? "SYNCING" : (root.scheduledMode ? "SCHEDULED" : "LIVE")
+                  color: root.scheduledMode ? Color.muted : "#42D392"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.letterSpacing: 0.7
+                }
+              }
+            }
           }
 
           Text {
             text: {
               if (root.errorText !== "") return root.errorText
-              if (root.loading) return "Updating…"
               if (!root.board) return "Waiting for data…"
               var stops = root.board.stops.filter(function(s) { return s.groups.length > 0 }).length
-              return stops > 0
-                ? stops + (stops === 1 ? " station" : " stations") + (root.scheduledMode ? " · scheduled times" : "")
-                : "No departures found"
+              var stationLabel = stops > 0
+                ? stops + (stops === 1 ? " STATION" : " STATIONS") : "NO DEPARTURES"
+              var stamp = root.updatedLabel()
+              return stamp !== "" ? stationLabel + "  ·  UPDATED " + stamp : stationLabel
             }
             color: root.errorText !== "" ? Color.urgent : Color.muted
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
+            font.letterSpacing: 0.35
           }
         }
 
-        Item { width: 1; height: 1 } // spring
+        Rectangle {
+          id: manageButton
+          height: Style.space(26)
+          width: manageLabel.implicitWidth + Style.space(16)
+          radius: height / 2
+          color: root.managing ? Qt.alpha(Color.accent, 0.16)
+            : (manageArea.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent)
+              : Qt.alpha(root.barForeground, 0.045))
+          border.width: 1
+          border.color: root.managing ? Qt.alpha(Color.accent, 0.42)
+            : Qt.alpha(root.barForeground, 0.12)
+          anchors.verticalCenter: parent.verticalCenter
+
+          Text {
+            id: manageLabel
+            anchors.centerIn: parent
+            text: root.managing ? "Done" : "Manage stations"
+            color: root.managing ? Color.accent : root.barForeground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            font.bold: root.managing
+          }
+
+          MouseArea {
+            id: manageArea
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            hoverEnabled: true
+            onClicked: root.managing ? panelSession.stopManaging() : panelSession.startManaging()
+          }
+        }
 
         Rectangle {
-          width: Style.space(26)
+          id: refreshButton
+          width: Style.space(28)
           height: Style.space(26)
-          radius: Math.min(4, Style.cornerRadius)
-          color: refreshArea.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : "transparent"
+          radius: height / 2
+          color: refreshArea.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent)
+            : Qt.alpha(root.barForeground, 0.045)
+          border.width: 1
+          border.color: Qt.alpha(root.barForeground, 0.12)
           anchors.verticalCenter: parent.verticalCenter
 
           Text {
@@ -300,7 +299,7 @@ Panel {
       Rectangle {
         width: parent.width
         height: 1
-        color: Qt.alpha(Color.foreground, 0.12)
+        color: Qt.alpha(Color.foreground, 0.08)
       }
 
       // ---- Departure board and one shared line-detail pane.
@@ -308,14 +307,14 @@ Panel {
         id: boardLayout
         visible: !root.managing
         width: parent.width
-        spacing: sideBySide ? Style.space(14) : 0
-        readonly property bool sideBySide: root.lineVisible && width >= Style.space(680)
+        spacing: sideBySide ? Style.space(16) : 0
+        readonly property bool sideBySide: width >= Style.space(680)
 
         Item {
           id: arrivalsPane
           visible: !root.lineVisible || boardLayout.sideBySide
-          width: visible ? (boardLayout.sideBySide ? Math.round((parent.width - boardLayout.spacing) * 0.48) : parent.width) : 0
-          height: visible ? Math.min(arrivalsContent.implicitHeight, Style.space(480)) : 0
+          width: visible ? (boardLayout.sideBySide ? Math.round((parent.width - boardLayout.spacing) * 0.45) : parent.width) : 0
+          height: visible ? Math.min(arrivalsContent.implicitHeight, Style.space(500)) : 0
           implicitHeight: height
 
           Flickable {
@@ -330,55 +329,93 @@ Panel {
             Column {
               id: arrivalsContent
               width: parent.width
-              spacing: Style.space(12)
+              spacing: Style.space(8)
 
               Repeater {
                 model: root.board ? root.board.stops : []
 
-                Column {
+                Item {
                   id: stopSection
                   required property var modelData
                   width: parent.width
-                  spacing: Style.space(7)
+                  height: sectionContent.implicitHeight + Style.space(12)
 
-                  Row {
-                    width: parent.width
-                    spacing: Style.space(6)
+                  Rectangle {
+                    anchors.fill: parent
+                    radius: Math.min(7, Style.cornerRadius)
+                    color: Qt.alpha(root.barForeground, 0.026)
+                    border.width: 1
+                    border.color: Qt.alpha(root.barForeground, 0.045)
+                  }
+
+                  Column {
+                    id: sectionContent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(6)
+                    spacing: Style.space(3)
+
+                    Row {
+                      width: parent.width
+                      spacing: Style.space(6)
+
+                      Rectangle {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(5)
+                        height: width
+                        radius: width / 2
+                        color: Qt.alpha(root.barForeground, 0.42)
+                      }
+
+                      Text {
+                        width: Math.max(0, parent.width - routeCountLabel.width - parent.spacing * 2
+                          - Style.space(5))
+                        text: stopSection.modelData.name.toUpperCase()
+                        textFormat: Text.PlainText
+                        color: root.barForeground
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        font.letterSpacing: 0.85
+                        elide: Text.ElideRight
+                      }
+
+                      Text {
+                        id: routeCountLabel
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: stopSection.modelData.groups.length + (stopSection.modelData.groups.length === 1
+                          ? " ROUTE" : " ROUTES")
+                        color: Qt.alpha(root.barForeground, 0.50)
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.letterSpacing: 0.45
+                      }
+                    }
+
+                    Repeater {
+                      model: stopSection.modelData.groups
+
+                      ArrivalRow {
+                        required property var modelData
+                        width: parent.width
+                        group: modelData
+                        nowMs: root.nowMs
+                        foreground: root.barForeground
+                        selected: root.lineVisible && root.activeLineKey === modelData.key
+                          && root.feed.activeLineStopId === modelData.stopId
+                        onActivated: if (root.feed) root.feed.toggleLine(modelData)
+                      }
+                    }
 
                     Text {
-                      text: stopSection.modelData.name
-                      textFormat: Text.PlainText
-                      color: root.barForeground
+                      visible: stopSection.modelData.groups.length === 0
+                      text: root.scheduledMode ? "No departures" : "No live predictions"
+                      color: Color.muted
                       font.family: Style.font.family
-                      font.pixelSize: Style.font.subtitle
-                      font.bold: true
-                      width: parent.width
-                      elide: Text.ElideRight
+                      font.pixelSize: Style.font.caption
+                      font.italic: true
                     }
-                  }
-
-                  Repeater {
-                    model: stopSection.modelData.groups
-
-                    ArrivalRow {
-                      required property var modelData
-                      width: parent.width
-                      group: modelData
-                      nowMs: root.nowMs
-                      foreground: root.barForeground
-                      selected: root.lineVisible && root.activeLineKey === modelData.key
-                        && root.feed.activeLineStopId === modelData.stopId
-                      onActivated: if (root.feed) root.feed.toggleLine(modelData)
-                    }
-                  }
-
-                  Text {
-                    visible: stopSection.modelData.groups.length === 0
-                    text: root.scheduledMode ? "No departures" : "No live predictions"
-                    color: Color.muted
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    font.italic: true
                   }
                 }
               }
@@ -420,7 +457,7 @@ Panel {
           visible: boardLayout.sideBySide
           width: visible ? 1 : 0
           height: Math.max(arrivalsPane.implicitHeight, linePane.implicitHeight)
-          color: Qt.alpha(root.barForeground, 0.12)
+          color: Qt.alpha(root.barForeground, 0.07)
         }
 
         Column {
@@ -480,7 +517,7 @@ Panel {
                 id: pinLineArea
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: if (root.feed) root.feed.togglePinnedLine()
+                onClicked: panelSession.togglePinnedLine()
               }
             }
 
@@ -523,6 +560,7 @@ Panel {
             foreground: root.barForeground
           }
         }
+
       }
 
       // ---- Station picker (manage view)
@@ -567,7 +605,7 @@ Panel {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 hoverEnabled: true
-                onClicked: root.setPickerMode(modeTab.modelData.mode)
+                onClicked: panelSession.setPickerMode(modeTab.modelData.mode)
               }
             }
           }
@@ -586,23 +624,22 @@ Panel {
             foreground: root.barForeground
 
             onTextChanged: {
-              root.stationQuery = text
-              searchDebounce.restart()
+              panelSession.setStationQuery(text)
             }
 
             Keys.onPressed: function(event) {
               if (event.key === Qt.Key_Escape) {
-                if (text !== "") { text = ""; searchDebounce.restart() }
-                else root.stopManaging()
+                if (text !== "") { text = ""; panelSession.clearStationQuery() }
+                else panelSession.stopManaging()
                 event.accepted = true
               } else if (event.key === Qt.Key_Down) {
-                root.moveResultSelection(1)
+                panelSession.moveResultSelection(1)
                 event.accepted = true
               } else if (event.key === Qt.Key_Up) {
-                root.moveResultSelection(-1)
+                panelSession.moveResultSelection(-1)
                 event.accepted = true
               } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                root.pickResult(root.resultIndex)
+                panelSession.pickResult(root.resultIndex)
                 event.accepted = true
               }
             }
@@ -615,8 +652,8 @@ Panel {
             configuredStopIds: root.configuredStopIds
             emptyText: root.stationQuery !== "" && root.stationResults.length === 0
               ? (root.feed && root.feed.stationsLoading ? "Loading stations…" : "No stations match") : ""
-            onPick: function(at) { root.pickResult(at) }
-            onHoveredRow: function(at) { root.resultIndex = at }
+            onPick: function(at) { panelSession.pickResult(at) }
+            onHoveredRow: function(at) { panelSession.resultIndex = at }
           }
         }
 
@@ -633,17 +670,18 @@ Panel {
             TextField {
               id: addressField
               width: Math.max(Style.space(120), parent.width - locateButton.width - radiusWrap.width - findButton.width - parent.spacing * 3)
-              placeholderText: "Address, place, or lat,lon"
+              placeholderText: "Your address, place, or lat,lon"
               foreground: root.barForeground
-              text: root.feed ? String(root.feed.readSetting("lastAddress", "") || "") : ""
+              text: panelSession.addressText
+              onTextChanged: panelSession.addressText = text
 
               Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Escape) {
                   if (text !== "") { text = "" }
-                  else root.stopManaging()
+                  else panelSession.stopManaging()
                   event.accepted = true
                 } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                  root.triggerNearbySearch()
+                  panelSession.triggerNearbySearch()
                   event.accepted = true
                 }
               }
@@ -660,11 +698,12 @@ Panel {
                 anchors.fill: parent
                 placeholderText: "km"
                 foreground: root.barForeground
-                text: root.feed ? String(root.feed.readSetting("lastRadiusKm", 1)) : "1"
+                text: panelSession.radiusText
+                onTextChanged: panelSession.radiusText = text
 
                 Keys.onPressed: function(event) {
                   if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                    root.triggerNearbySearch()
+                    panelSession.triggerNearbySearch()
                     event.accepted = true
                   }
                 }
@@ -682,7 +721,7 @@ Panel {
               Text {
                 id: locateLabel
                 anchors.centerIn: parent
-                text: "⌖ My location"
+                text: "⌖ Saved location"
                 color: root.barForeground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
@@ -693,7 +732,7 @@ Panel {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 hoverEnabled: true
-                onClicked: root.useMyLocation()
+                onClicked: panelSession.useSavedLocation()
               }
             }
 
@@ -720,7 +759,7 @@ Panel {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 hoverEnabled: true
-                onClicked: root.triggerNearbySearch()
+                onClicked: panelSession.triggerNearbySearch()
               }
             }
           }
@@ -747,8 +786,8 @@ Panel {
             selectedIndex: root.resultIndex
             configuredStopIds: root.configuredStopIds
             showDistances: true
-            onPick: function(at) { root.pickResult(at) }
-            onHoveredRow: function(at) { root.resultIndex = at }
+            onPick: function(at) { panelSession.pickResult(at) }
+            onHoveredRow: function(at) { panelSession.resultIndex = at }
           }
         }
 
@@ -781,6 +820,7 @@ Panel {
                 Text {
                   id: chipNameLabel
                   text: chip.chipName
+                  textFormat: Text.PlainText
                   color: root.barForeground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
@@ -801,7 +841,7 @@ Panel {
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: if (root.feed) root.feed.toggleStop(chip.modelData)
+                onClicked: panelSession.toggleStop(chip.modelData)
               }
             }
           }
@@ -825,56 +865,6 @@ Panel {
         }
       }
 
-      Rectangle {
-        width: parent.width
-        height: 1
-        color: Qt.alpha(Color.foreground, 0.12)
-      }
-
-      // ---- Footer: schedule-mode note + station manager toggle.
-      Row {
-        width: parent.width
-        spacing: Style.space(8)
-
-        Text {
-          anchors.verticalCenter: parent.verticalCenter
-          text: {
-            if (root.scheduledMode) return "Showing scheduled times (no live data)"
-            var stamp = root.updatedLabel()
-            return stamp !== "" ? "Updated " + stamp : ""
-          }
-          color: root.scheduledMode ? Color.muted : Color.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-        }
-
-        Item { width: 1; height: 1 } // spring
-
-        Rectangle {
-          height: Style.space(22)
-          width: manageLabel.implicitWidth + Style.space(14)
-          radius: Math.min(4, Style.cornerRadius)
-          color: manageArea.containsMouse ? Style.hoverFillFor(root.barForeground, Color.accent) : Style.normalFillFor(root.barForeground, Color.accent)
-          anchors.verticalCenter: parent.verticalCenter
-
-          Text {
-            id: manageLabel
-            anchors.centerIn: parent
-            text: root.managing ? "Done" : "Manage stations"
-            color: root.barForeground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            font.bold: root.managing
-          }
-
-          MouseArea {
-            id: manageArea
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.managing ? root.stopManaging() : root.startManaging()
-          }
-        }
-      }
     }
   }
 }

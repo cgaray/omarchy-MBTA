@@ -27,7 +27,7 @@ const BASE_MEMBERS = new Set([
 function declaredNames(source) {
   const names = new Set()
   const patterns = [
-    /^\s*(?:readonly\s+)?(?:default\s+)?property\s+(?:var|bool|string|real|int|double|date|color|alias|QtObject|Item|Rectangle|Column|Row)\s+(\w+)/gm,
+    /^\s*(?:(?:readonly|required|default)\s+)*property\s+(?:var|bool|string|real|int|double|date|color|alias|QtObject|Item|Rectangle|Column|Row)\s+(\w+)/gm,
     /^\s*function\s+(\w+)\s*\(/gm,
     /^\s*signal\s+(\w+)\s*(\(|$)/gm,
     /^\s*id:\s*(\w+)\s*$/gm

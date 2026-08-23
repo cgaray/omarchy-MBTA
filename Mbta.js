@@ -33,8 +33,12 @@ function boundedList(value, maxLength) {
   return Array.isArray(value) ? value.slice(0, maxLength) : []
 }
 
+function dictionary() {
+  return Object.create(null)
+}
+
 function parseStopIds(raw) {
-  var seen = {}
+  var seen = dictionary()
   var out = []
   var parts = boundedText(raw, 1620).split(",")
   for (var i = 0; i < parts.length && out.length < 20; i++) {
@@ -53,19 +57,28 @@ function serializeStopIds(ids) {
 function predictionsUrl(stopIds) {
   return API_BASE + "/predictions"
     + "?filter%5Bstop%5D=" + encodeURIComponent(serializeStopIds(stopIds))
-    + "&sort=arrival_time"
+    + "&sort=time"
     + "&include=route,trip,stop"
+    + "&fields%5Bprediction%5D=arrival_time,departure_time,direction_id,status,route,trip,stop"
+    + "&fields%5Broute%5D=color,long_name,short_name,text_color,type"
+    + "&fields%5Btrip%5D=headsign"
+    + "&fields%5Bstop%5D=name,parent_station"
 }
 
 // minTime/maxTime are local "HH:MM" strings the caller computes around now;
 // schedules have no predictions to lean on, so the window keeps the payload small.
-function schedulesUrl(stopIds, minTime, maxTime) {
+function schedulesUrl(stopIds, serviceDate, minTime, maxTime) {
   return API_BASE + "/schedules"
     + "?filter%5Bstop%5D=" + encodeURIComponent(serializeStopIds(stopIds))
+    + "&filter%5Bdate%5D=" + encodeURIComponent(String(serviceDate))
     + "&filter%5Bmin_time%5D=" + encodeURIComponent(String(minTime || "00:00"))
     + "&filter%5Bmax_time%5D=" + encodeURIComponent(String(maxTime || "23:59"))
-    + "&sort=departure_time"
+    + "&sort=time"
     + "&include=route,trip,stop"
+    + "&fields%5Bschedule%5D=arrival_time,departure_time,direction_id,route,trip,stop"
+    + "&fields%5Broute%5D=color,long_name,short_name,text_color,type"
+    + "&fields%5Btrip%5D=headsign"
+    + "&fields%5Bstop%5D=name,parent_station"
 }
 
 function stationsUrl() {
@@ -74,14 +87,17 @@ function stationsUrl() {
   // roughly half. Fetched once per session and cached for the picker.
   return API_BASE + "/stops"
     + "?filter%5Blocation_type%5D=0,1"
-    + "&fields%5Bstop%5D=name,municipality,location_type"
+    + "&fields%5Bstop%5D=name,municipality,parent_station"
 }
 
 // ---- Strip map (tap a line row to see the route with live vehicles) ----
 
 // Ordered stops for one direction of a route.
-function lineStopsUrl(routeId, directionId) {
-  return API_BASE + "/stops?filter%5Broute%5D=" + encodeURIComponent(String(routeId))
+function lineStopsUrl(tripId) {
+  return API_BASE + "/trips/" + encodeURIComponent(boundedText(tripId, 100))
+    + "?include=stops"
+    + "&fields%5Btrip%5D=stops"
+    + "&fields%5Bstop%5D=name,parent_station"
 }
 
 function vehiclesUrl(routeId, directionId) {
@@ -89,19 +105,33 @@ function vehiclesUrl(routeId, directionId) {
     + "?filter%5Broute%5D=" + encodeURIComponent(String(routeId))
     + "&filter%5Bdirection_id%5D=" + encodeURIComponent(String(directionId))
     + "&include=stop"
+    + "&page%5Blimit%5D=200"
+    + "&fields%5Bvehicle%5D=current_status,label,stop,trip"
+    + "&fields%5Bstop%5D=parent_station"
 }
 
-function parseLineStops(payload, directionId) {
-  var data = boundedList(payload && payload.data, 500)
+function parseLineStops(payload) {
+  var included = boundedList(payload && payload.included, 1000)
+  var stopsById = dictionary()
+  for (var i = 0; i < included.length; i++) {
+    var includedStop = included[i]
+    if (includedStop && includedStop.type === "stop" && includedStop.id)
+      stopsById[includedStop.id] = includedStop
+  }
+  var relationships = payload && payload.data && payload.data.relationships
+  var stopRefs = boundedList(relationships && relationships.stops
+    && relationships.stops.data, 500)
   var out = []
-  for (var i = 0; i < data.length; i++) {
-    var stop = data[i]
+  for (var s = 0; s < stopRefs.length; s++) {
+    var stop = stopsById[stopRefs[s].id]
     if (!stop || !stop.id || !stop.attributes) continue
     var name = boundedText(stop.attributes.name, 160)
     if (name === "") continue
-    out.push({ id: String(stop.id), name: name })
+    var parent = stop.relationships && stop.relationships.parent_station
+      && stop.relationships.parent_station.data
+    var id = parent && parent.id ? String(parent.id) : String(stop.id)
+    if (!out.length || out[out.length - 1].id !== id) out.push({ id: id, name: name })
   }
-  if (Number(directionId) === 1) out.reverse()
   return out
 }
 
@@ -114,10 +144,10 @@ function parseVehicles(payload, orderedStops) {
   var count = orderedStops.length
   if (!count) return []
 
-  var indexById = {}
+  var indexById = dictionary()
   for (var s = 0; s < count; s++) indexById[orderedStops[s].id] = s
 
-  var parentByStop = {}
+  var parentByStop = dictionary()
   var included = boundedList(payload && payload.included, 500)
   for (var p = 0; p < included.length; p++) {
     var includedStop = included[p]
@@ -127,7 +157,7 @@ function parseVehicles(payload, orderedStops) {
       parentByStop[String(includedStop.id)] = String(parentRel.data.id)
   }
 
-  var byTrip = {}
+  var byTrip = dictionary()
   var out = []
   for (var i = 0; i < data.length; i++) {
     var v = data[i]
@@ -176,7 +206,7 @@ function parseVehicles(payload, orderedStops) {
 
 // included[] → { route: {id: obj}, trip: {id: obj}, stop: {id: obj} }
 function indexIncluded(included) {
-  var index = { route: {}, trip: {}, stop: {} }
+  var index = { route: dictionary(), trip: dictionary(), stop: dictionary() }
   var list = boundedList(included, 3000)
   for (var i = 0; i < list.length; i++) {
     var entry = list[i]
@@ -240,7 +270,7 @@ function routeBadge(route) {
 // parent ids from their platforms, and top-level ids (street bus stops)
 // directly, since those appear in included[] themselves.
 function parentStationMap(stopIndex) {
-  var names = {}
+  var names = dictionary()
   for (var id in stopIndex.stop) {
     var stop = stopIndex.stop[id]
     if (!stop || !stop.attributes || !stop.attributes.name) continue
@@ -340,19 +370,20 @@ function groupKey(row) {
 // rows must already carry resolvedConfiguredStopId. Output is ordered by each
 // group's first departure; times inside a group are capped and labeled here.
 function buildBoard(rows, stopIndex, configuredIds, nowMs, cap) {
-  var configuredSet = {}
+  var configuredSet = dictionary()
   for (var c = 0; c < configuredIds.length; c++) configuredSet[configuredIds[c]] = true
   var parentNames = parentStationMap(stopIndex)
 
   var limit = Math.max(1, cap || 3)
-  var byStop = {}
+  var byStop = dictionary()
   for (var s = 0; s < configuredIds.length; s++) {
     byStop[configuredIds[s]] = []
   }
 
-  var overflow = {}
+  var overflow = dictionary()
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i]
+    if (!row || row.timeMs < nowMs) continue
     var stopId = resolveConfiguredStopId(row.stopId, stopIndex, configuredSet, parentNames)
     if (!stopId) continue
     row.configuredStopId = stopId
@@ -369,6 +400,7 @@ function buildBoard(rows, stopIndex, configuredIds, nowMs, cap) {
         stopId: stopId,
         routeId: row.routeId,
         directionId: row.directionId,
+        tripId: row.tripId,
         headsign: row.headsign,
         badge: routeBadge(route),
         routeType: route && route.attributes ? parseInt(String(route.attributes.type), 10) : -1,
@@ -433,15 +465,19 @@ function linePinKey(group) {
   return String(group.stopId || "") + "|" + String(group.key || "")
 }
 
-function pinnedNextLabel(board, pinKey) {
+function pinnedNextLabel(board, pinKey, nowMs) {
   var key = String(pinKey || "")
   if (!board || key === "") return ""
   var stops = board.stops || []
   for (var s = 0; s < stops.length; s++) {
     var groups = stops[s].groups || []
     for (var g = 0; g < groups.length; g++) {
-      if (linePinKey(groups[g]) === key)
-        return groups[g].times && groups[g].times.length ? String(groups[g].times[0].label || "") : ""
+      if (linePinKey(groups[g]) === key) {
+        if (!groups[g].times || !groups[g].times.length) return ""
+        return nowMs === undefined
+          ? String(groups[g].times[0].label || "")
+          : countdownLabel(groups[g].times[0].ms - nowMs)
+      }
     }
   }
   return ""
@@ -452,12 +488,23 @@ function stopNameFor(id, parentNames) {
   return id
 }
 
-// Local "HH:MM" strings bounding the schedule-fallback window: now .. +2h.
+// MBTA service days run past midnight using 24:xx..27:xx clock values.
 function scheduleWindow(nowDate) {
   function pad(n) { return (n < 10 ? "0" : "") + n }
-  function stamp(d) { return pad(d.getHours()) + ":" + pad(d.getMinutes()) }
-  var end = new Date(nowDate.getTime() + 120 * 60000)
-  return { min: stamp(nowDate), max: stamp(end) }
+  function dayNumber(d) { return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000 }
+  function dateStamp(d) {
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+  }
+  var serviceDate = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate())
+  if (nowDate.getHours() < 3) serviceDate.setDate(serviceDate.getDate() - 1)
+  function stamp(d) {
+    var hour = (dayNumber(d) - dayNumber(serviceDate)) * 24 + d.getHours()
+    return pad(hour) + ":" + pad(d.getMinutes())
+  }
+  // The extra five minutes cover the coordinator's schedule-cache lifetime,
+  // preserving a full two-hour horizon at the oldest valid cache hit.
+  var end = new Date(nowDate.getTime() + 125 * 60000)
+  return { date: dateStamp(serviceDate), min: stamp(nowDate), max: stamp(end) }
 }
 
 // Station picker search over the cached stop list (rail stations AND street
@@ -465,12 +512,13 @@ function scheduleWindow(nowDate) {
 // substrings. Duplicate names collapse to one row: platforms share their
 // station's name, so prefer top-level representatives, then place-* ids.
 function dedupeStops(dataList) {
-  var best = {}
+  var best = dictionary()
   var list = boundedList(dataList, 10000)
   for (var i = 0; i < list.length; i++) {
     var stop = list[i]
-    if (!stop || !stop.id || !stop.attributes) continue
-    var name = boundedText(stop.attributes.name, 160)
+    if (!stop || !stop.id) continue
+    var attrs = stop.attributes || stop
+    var name = boundedText(attrs.name, 160)
     if (name === "") continue
 
     var parentData = stop.relationships && stop.relationships.parent_station
@@ -478,7 +526,7 @@ function dedupeStops(dataList) {
     var candidate = {
       id: boundedText(stop.id, 80),
       name: name,
-      municipality: stop.attributes.municipality ? boundedText(stop.attributes.municipality, 120) : "",
+      municipality: attrs.municipality ? boundedText(attrs.municipality, 120) : "",
       rank: (!parentData || !parentData.id ? 0 : 8)
         + (String(stop.id).indexOf("place-") === 0 ? 0 : 1)
     }
@@ -527,8 +575,7 @@ function escapeRegExp(text) {
 
 // ---- Nearby-station search -------------------------------------------------
 //
-// Origin comes from three places, in order of trust: raw "lat,lon" typed by
-// the user, coordinates the weather plugin already saved, or an IP lookup.
+// Origin comes from raw "lat,lon" typed by the user or an IP lookup.
 // The MBTA geo endpoint takes its radius in degrees; users think in km.
 
 function parseLatLon(text) {
@@ -541,30 +588,6 @@ function parseLatLon(text) {
   if (isNaN(latitude) || isNaN(longitude)) return null
   if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null
   return { latitude: latitude, longitude: longitude }
-}
-
-// ipinfo.io/loc answers with a bare "42.4239,-71.1742" line.
-function parseIpLoc(raw) {
-  return parseLatLon(String(raw || "").trim())
-}
-
-// weather.json is owned by omarchy's weather plugin; when it carries
-// coordinates they are the user's declared location, so prefer them over IP.
-function parseWeatherLocation(raw) {
-  try {
-    var data = JSON.parse(String(raw || ""))
-    if (!data || typeof data !== "object") return null
-    var latitude = parseFloat(data.latitude)
-    var longitude = parseFloat(data.longitude)
-    if (isNaN(latitude) || isNaN(longitude)) return null
-    return {
-      name: typeof data.name === "string" ? data.name : "",
-      latitude: latitude,
-      longitude: longitude
-    }
-  } catch (e) {
-    return null
-  }
 }
 
 function radiusDegrees(km) {
@@ -597,6 +620,10 @@ function nearbyUrl(latitude, longitude, radiusKm) {
     + "?filter%5Blatitude%5D=" + encodeURIComponent(String(latitude))
     + "&filter%5Blongitude%5D=" + encodeURIComponent(String(longitude))
     + "&filter%5Bradius%5D=" + encodeURIComponent(String(radiusDegrees(radiusKm)))
+    + "&filter%5Blocation_type%5D=0,1"
+    + "&sort=distance"
+    + "&page%5Blimit%5D=500"
+    + "&fields%5Bstop%5D=name,municipality,latitude,longitude,location_type,parent_station"
 }
 
 // Address → coordinates via OpenStreetMap's Nominatim (free, no key; usage
@@ -641,7 +668,7 @@ function parseGeocoding(raw) {
 // into their parent station id, and score each by distance to the origin.
 function collectNearbyStops(payload, originLat, originLon) {
   var data = boundedList(payload && payload.data, 2000)
-  var byKey = {}
+  var byKey = dictionary()
   for (var i = 0; i < data.length; i++) {
     var stop = data[i]
     if (!stop || !stop.id || !stop.attributes) continue
@@ -693,6 +720,7 @@ function collectNearbyStops(payload, originLat, originLon) {
 if (typeof module !== "undefined") {
   module.exports = {
     DEFAULT_STOP_IDS: DEFAULT_STOP_IDS,
+    dictionary: dictionary,
     parseStopIds: parseStopIds,
     serializeStopIds: serializeStopIds,
     predictionsUrl: predictionsUrl,
@@ -718,8 +746,6 @@ if (typeof module !== "undefined") {
     filterStations: filterStations,
     escapeRegExp: escapeRegExp,
     parseLatLon: parseLatLon,
-    parseIpLoc: parseIpLoc,
-    parseWeatherLocation: parseWeatherLocation,
     radiusDegrees: radiusDegrees,
     haversineMeters: haversineMeters,
     formatDistance: formatDistance,

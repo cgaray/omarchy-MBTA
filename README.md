@@ -19,15 +19,15 @@ omarchy plugin add https://github.com/cgaray/omarchy-MBTA.git --enable
   station and destination row pinned from the panel. Middle/right click forces
   a refresh.
 - **Click the pill** to open the board: departures grouped per station and
-  route/direction, with one shared scrollable line map and live vehicle markers.
+  route/direction. Selecting a row opens a scrollable stop-order strip with
+  live vehicle markers.
 - **Pin** in the line pane makes that station and destination feed the bar
   countdown until it is unpinned.
 - **Manage stations** opens the picker:
   - *By name* — search every station in the system ("Davis", "North Station").
-  - *Near address* — type an address, place, or raw `lat,lon`, set a radius in
-    km, and hit **Find**. **⌖ My location** skips typing: it prefers the
-    coordinates saved by Omarchy's weather plugin, then falls back to an IP
-    location lookup.
+  - *Near address* — type your address, place, or raw `lat,lon`, set a radius in
+    km, and hit **Find**. The location is saved for future sessions;
+    **⌖ Saved location** reuses it without retyping.
 - Selected stations persist in shell.json (per-widget settings) and survive
   restarts.
 
@@ -35,7 +35,7 @@ Late at night, when real-time predictions go quiet, the board falls back to
 scheduled times and says so in the footer.
 
 Keyboard: `Esc` closes (clears the search field first), `Tab` switches panels,
-`↑`/`↓`+`Enter` work inside both pickers.
+and `↑`/`↓`+`Enter` select results in the name picker.
 
 ## Configure
 
@@ -48,10 +48,11 @@ omarchy bar move io.github.cgaray.mbta --section right
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `stopIds` | Downtown Boston five | Stations on the board (the picker edits this) |
-| `refreshSec` | 30 | Prediction fetch interval (15–300s) |
+| `refreshSec` | 60 | Prediction fetch interval (60–300s) |
 | `perGroupCap` | 3 | Countdown chips kept per route/direction row |
 | `scheduleFallback` | true | Show scheduled times when predictions are empty |
 | `pinnedLine` | empty | Internal station/line selection set by the panel's Pin control |
+| `lastAddress` | empty | Your saved address, place, or coordinates for nearby stations |
 
 The plugin uses anonymous MBTA access and does not store API credentials.
 
@@ -67,22 +68,23 @@ omarchy-shell shell summon io.github.cgaray.mbta '{}'
 ## Data sources
 
 - [MBTA V3 API](https://www.mbta.com/developers/v3-api) — predictions,
-  schedules, stops, geo search. No key required for light use.
+  schedules, stops, nearby search, trips, and vehicles. No key required for
+  light use.
 - [OpenStreetMap Nominatim](https://nominatim.org/) — address → coordinates
   for the "near address" flow (sends an identifying User-Agent).
-- `ipinfo.io/loc` — one-time IP location fallback when no saved location exists.
 
-Predictions are requested at startup and every 15–300 seconds (30 seconds by
-default). Empty predictions may trigger one bounded schedule request. An open
-line view requests vehicles every 20 seconds. Address and IP-location requests
-only occur after the corresponding user action.
+Predictions are requested at startup and every 60–300 seconds (60 seconds by
+default). Empty predictions may use a schedule response cached for five
+minutes. A visible line view requests vehicles every 60 seconds; polling stops
+when the panel or line view is hidden. All MBTA requests share a conservative
+rolling budget of 8 requests per minute, below the anonymous API limit of 20;
+throttled line details retry without sending additional requests.
+Address requests only occur after the corresponding user action.
 
-Selected stop IDs, the optional pinned line, picker mode, radius, and last
-typed address are retained in Omarchy's widget settings. The plugin reads the
-weather plugin's saved location through a bounded regular-file check, but only
-sends coordinates to MBTA after the user chooses My location. Removing the
-plugin may leave its widget settings in Omarchy's shell configuration; clear
-the saved address and pin in the panel before removal if desired.
+Selected stop IDs, the optional pinned line, picker mode, radius, and saved
+location are retained in Omarchy's widget settings. Removing the plugin may
+leave its widget settings in Omarchy's shell configuration; clear the saved
+location and pin in the panel before removal if desired.
 
 Runtime dependencies: Python 3 and the standard library. Network responses are
 fetched through the bundled allowlisted adapter with endpoint-specific byte

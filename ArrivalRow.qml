@@ -14,35 +14,66 @@ Item {
   property color accentColor: Color.accent
   property color mutedColor: Color.muted
   property bool selected: false
+  readonly property color routeColor: root.group && root.group.badge
+    ? ("#" + root.group.badge.color) : root.accentColor
+  readonly property int hiddenTimeCount: root.group && root.group.times
+    ? Math.max(0, root.group.times.length - 3) + Number(root.group.more || 0) : 0
 
   signal activated()
+  signal hoverStateChanged(var group, bool hovered)
 
-  property real spacing: Style.space(10)
-  height: badge.height
+  property real spacing: Style.space(8)
+  height: Style.space(34)
 
   Rectangle {
+    id: background
     anchors.fill: parent
-    anchors.margins: -Style.space(4)
-    radius: Math.min(4, Style.cornerRadius)
-    color: root.selected ? Qt.alpha(root.accentColor, 0.10) : "transparent"
+    anchors.topMargin: 1
+    anchors.bottomMargin: 1
+    radius: Math.min(6, Style.cornerRadius)
+    color: root.selected ? Qt.alpha(root.routeColor, 0.14)
+      : (rowArea.containsMouse ? Qt.alpha(root.foreground, 0.065) : "transparent")
+    Behavior on color { ColorAnimation { duration: 110 } }
+  }
+
+  Rectangle {
+    visible: root.selected
+    anchors.left: parent.left
+    anchors.verticalCenter: parent.verticalCenter
+    width: 2
+    height: parent.height - Style.space(10)
+    radius: width / 2
+    color: root.routeColor
   }
 
   Row {
     id: contentRow
-    anchors.fill: parent
+    anchors.left: parent.left
+    anchors.right: parent.right
+    anchors.verticalCenter: parent.verticalCenter
+    anchors.leftMargin: Style.space(4)
+    anchors.rightMargin: Style.space(2)
     spacing: root.spacing
 
-    RouteBadge {
-      id: badge
-      anchors.verticalCenter: parent.verticalCenter
-      badgeLabel: root.group ? root.group.badge.label : ""
-      badgeColorHex: root.group ? root.group.badge.color : ""
-      badgeTextHex: root.group ? root.group.badge.textColor : ""
+    Item {
+      id: badgeSlot
+      width: Style.space(34)
+      height: root.height
+
+      RouteBadge {
+        id: badge
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        badgeLabel: root.group ? root.group.badge.label : ""
+        badgeColorHex: root.group ? root.group.badge.color : ""
+        badgeTextHex: root.group ? root.group.badge.textColor : ""
+      }
     }
 
     Text {
       anchors.verticalCenter: parent.verticalCenter
-      width: Math.max(0, root.width - badge.width - chipsRow.width - toggleIndicator.width - root.spacing * 3)
+      width: Math.max(0, contentRow.width - badgeSlot.width - timeCluster.width
+        - toggleIndicator.width - root.spacing * 3)
       text: root.group && root.group.headsign !== "" ? root.group.headsign : "Departures"
       textFormat: Text.PlainText
       color: root.foreground
@@ -51,56 +82,90 @@ Item {
       elide: Text.ElideRight
     }
 
-    Row {
-      id: chipsRow
-      anchors.verticalCenter: parent.verticalCenter
-      spacing: Style.space(7)
+    Item {
+      id: timeCluster
+      width: Style.space(128)
+      height: root.height
 
-      Repeater {
-        model: root.group ? root.group.times : []
+      Rectangle {
+        visible: !!root.group && root.group.times && root.group.times.length > 0
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(38)
+        height: Style.space(23)
+        radius: height / 2
+        color: Qt.alpha(root.routeColor, 0.16)
+        border.width: 1
+        border.color: Qt.alpha(root.routeColor, 0.34)
 
         Text {
-          id: chip
-          required property int index
-          required property var modelData
-
-          readonly property string label: modelData && root.nowMs > 0
-            ? Mbta.countdownLabel(modelData.ms - root.nowMs)
-            : ""
-
-          anchors.verticalCenter: parent.verticalCenter
-          text: label
-          color: index === 0 ? root.accentColor : root.mutedColor
+          anchors.centerIn: parent
+          text: root.group && root.group.times.length && root.nowMs > 0
+            ? Mbta.countdownLabel(root.group.times[0].ms - root.nowMs) : ""
+          color: root.foreground
           font.family: Style.font.family
-          font.pixelSize: index === 0 ? Style.font.body : Style.font.bodySmall
-          font.bold: index === 0
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
         }
       }
 
-      Text {
+      Row {
+        anchors.left: parent.left
+        anchors.leftMargin: Style.space(46)
+        anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
-        visible: !!root.group && root.group.more > 0
-        text: root.group ? "+" + root.group.more : ""
-        color: root.mutedColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        spacing: Style.space(4)
+
+        Repeater {
+          model: root.group && root.group.times ? root.group.times.slice(1, 3) : []
+
+          Text {
+            required property var modelData
+            anchors.verticalCenter: parent.verticalCenter
+            text: modelData && root.nowMs > 0
+              ? Mbta.countdownLabel(modelData.ms - root.nowMs) : ""
+            color: Qt.alpha(root.foreground, 0.62)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
+
+        Rectangle {
+          visible: root.hiddenTimeCount > 0
+          width: moreLabel.implicitWidth + Style.space(7)
+          height: Style.space(18)
+          radius: height / 2
+          color: Qt.alpha(root.foreground, 0.10)
+
+          Text {
+            id: moreLabel
+            anchors.centerIn: parent
+            text: "+" + root.hiddenTimeCount
+            color: Qt.alpha(root.foreground, 0.58)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+        }
       }
     }
 
     Text {
       id: toggleIndicator
       anchors.verticalCenter: parent.verticalCenter
-      text: root.selected ? "▴" : "▾"
-      color: root.mutedColor
+      text: root.selected ? "−" : "›"
+      color: Qt.alpha(root.foreground, 0.52)
       font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Style.font.body
     }
   }
 
   MouseArea {
+    id: rowArea
     anchors.fill: parent
-    anchors.margins: -Style.space(4)
     cursorShape: Qt.PointingHandCursor
+    hoverEnabled: true
+    onEntered: root.hoverStateChanged(root.group, true)
+    onExited: root.hoverStateChanged(root.group, false)
     onClicked: root.activated()
   }
 }

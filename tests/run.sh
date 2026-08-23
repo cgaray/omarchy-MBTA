@@ -6,6 +6,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "== node tests =="
 node "$DIR/mbta-test.js"
+node "$DIR/mbta-api-test.js"
+node "$DIR/architecture-test.js"
 
 echo "== qml refs =="
 node "$DIR/refs-test.js"
@@ -19,8 +21,11 @@ echo "  ok  dev-sync.sh parses"
 
 echo "== helper syntax =="
 python3 -c 'import ast, pathlib, sys; [ast.parse(pathlib.Path(p).read_text()) for p in sys.argv[1:]]' \
-  "$DIR/../bin/mbta-fetch" "$DIR/../bin/read-weather-location"
+  "$DIR/../bin/mbta-fetch"
 echo "  ok  bounded helpers parse"
+
+echo "== security helpers =="
+python3 "$DIR/security-test.py"
 
 if command -v qmllint >/dev/null 2>&1 && [ -n "${OMARCHY_PATH:-}" ]; then
   echo "== qmllint =="
@@ -29,7 +34,7 @@ if command -v qmllint >/dev/null 2>&1 && [ -n "${OMARCHY_PATH:-}" ]; then
   # declarations crashes this qmllint (exit 255, no diagnostics) — the same
   # first-party limitation arcade's suite documents. contract-test.sh covers
   # the widget's runtime shape instead.
-  for f in Panel.qml ArrivalRow.qml RouteBadge.qml StationResultRow.qml; do
+  for f in Panel.qml ArrivalFeed.qml BoundedRequest.qml RouteExplorer.qml ArrivalRow.qml RouteBadge.qml StationResultRow.qml; do
     if qmllint -I "$OMARCHY_PATH/shell" "$DIR/../$f"; then
       echo "  ok  $f"
     else

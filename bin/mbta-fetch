@@ -1,12 +1,95 @@
 #!/usr/bin/env python3
+import fcntl
+import json
+import os
 import signal
+import stat
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 
-ALLOWED_HOSTS = {"api-v3.mbta.com", "nominatim.openstreetmap.org", "ipinfo.io"}
+ALLOWED_HOSTS = {"api-v3.mbta.com", "nominatim.openstreetmap.org"}
+MBTA_RATE_LIMIT = 8
+MBTA_RATE_WINDOW = 60
+
+
+def rate_state_path():
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return os.path.join(runtime_dir, "omarchy-mbta-api-rate.json")
+
+
+def update_rate_state(mutator):
+    path = rate_state_path()
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077):
+            return None
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            raw = os.read(fd, 4096).decode("ascii", errors="ignore")
+            state = json.loads(raw) if raw else {}
+        except (ValueError, OSError):
+            state = {}
+        result = mutator(state)
+        encoded = json.dumps(state, separators=(",", ":")).encode("ascii")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, encoded)
+        return result
+    finally:
+        os.close(fd)
+
+
+def reserve_mbta_request(timeout):
+    now = time.time()
+
+    def reserve(state):
+        timestamps = [float(value) for value in state.get("timestamps", [])
+                      if isinstance(value, (int, float)) and float(value) > now - MBTA_RATE_WINDOW]
+        timestamps.sort()
+        blocked_until = float(state.get("blockedUntil", 0) or 0)
+        scheduled = max(now, blocked_until)
+        if len(timestamps) >= MBTA_RATE_LIMIT:
+            scheduled = max(scheduled, timestamps[-MBTA_RATE_LIMIT] + MBTA_RATE_WINDOW)
+        delay = scheduled - now
+        if delay > max(0, timeout - 5):
+            state["timestamps"] = timestamps[-MBTA_RATE_LIMIT:]
+            return None
+        timestamps.append(scheduled)
+        state["timestamps"] = timestamps[-MBTA_RATE_LIMIT:]
+        return max(0, delay)
+
+    delay = update_rate_state(reserve)
+    if delay is None:
+        return False
+    if delay > 0:
+        time.sleep(delay)
+    return True
+
+
+def block_mbta_requests(headers):
+    try:
+        reset = float(headers.get("x-ratelimit-reset", 0) or 0)
+    except (TypeError, ValueError):
+        reset = time.time() + MBTA_RATE_WINDOW
+    if reset <= time.time():
+        reset = time.time() + MBTA_RATE_WINDOW
+
+    def block(state):
+        state["blockedUntil"] = reset
+
+    update_rate_state(block)
 
 
 class NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -23,10 +106,18 @@ def main():
     parsed = urllib.parse.urlsplit(url)
     if not 1 <= limit <= 4_194_304 or not 1 <= timeout <= 20:
         return 2
-    if len(url) > 4096 or parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS:
+    try:
+        port = parsed.port
+    except ValueError:
+        return 2
+    if (len(url) > 4096 or parsed.scheme != "https" or parsed.hostname not in ALLOWED_HOSTS
+            or parsed.username is not None or parsed.password is not None
+            or port not in (None, 443)):
         return 2
 
     signal.alarm(timeout)
+    if parsed.hostname == "api-v3.mbta.com" and not reserve_mbta_request(timeout):
+        return 6
     request = urllib.request.Request(url, headers={
         "Accept": "application/json, text/plain;q=0.5",
         "Accept-Encoding": "identity",
@@ -38,6 +129,11 @@ def main():
             if response.headers.get("Content-Encoding", "identity").lower() != "identity":
                 return 3
             body = response.read(limit + 1)
+    except urllib.error.HTTPError as error:
+        if error.code == 429:
+            block_mbta_requests(error.headers)
+            return 6
+        return 4
     except (OSError, urllib.error.URLError, ValueError):
         return 4
     if len(body) > limit:

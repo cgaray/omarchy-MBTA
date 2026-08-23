@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Mbta.js" as Mbta
+import "MbtaApi.js" as MbtaApi
 
 // MBTA bar widget: a transit icon plus the next departure across every
 // configured stop, refreshed live from api-v3.mbta.com. Clicking opens the
@@ -12,159 +13,110 @@ BarWidget {
   id: root
   moduleName: "io.github.cgaray.mbta"
 
-  // ---- Settings (inline shell.json entry for this module)
-  readonly property var configuredStopIds: Mbta.parseStopIds(setting("stopIds", Mbta.serializeStopIds(Mbta.DEFAULT_STOP_IDS)))
-  readonly property int refreshSec: Math.max(15, Math.min(300, parseInt(setting("refreshSec", 30), 10) || 30))
-  readonly property int perGroupCap: Math.max(1, Math.min(6, parseInt(setting("perGroupCap", 3), 10) || 3))
-  readonly property bool scheduleFallback: setting("scheduleFallback", true) !== false
-  readonly property string pinnedLineKey: String(setting("pinnedLine", "") || "").slice(0, 300)
+  // ---- Settings compatibility surface. MbtaSettings owns all interpretation
+  // and mutations; the host adapter only echoes and persists a complete entry.
+  readonly property var configuredStopIds: settingsAdapter.configuredStopIds
+  readonly property int refreshSec: settingsAdapter.refreshSec
+  readonly property int perGroupCap: settingsAdapter.perGroupCap
+  readonly property bool scheduleFallback: settingsAdapter.scheduleFallback
+  readonly property string pinnedLineKey: settingsAdapter.pinnedLineKey
+  readonly property var mbtaSettings: settingsAdapter
   readonly property string fetchHelper: String(Qt.resolvedUrl("bin/mbta-fetch")).replace(/^file:\/\//, "")
-  readonly property string weatherReader: String(Qt.resolvedUrl("bin/read-weather-location")).replace(/^file:\/\//, "")
+  readonly property var api: MbtaApi.create(Mbta)
 
-  // ---- Live data state
-  // Raw rows and the included-index survive between fetches; `board` is
-  // rebuilt from them on each clock tick so countdown labels stay honest
-  // without re-fetching.
-  property var lastRows: []
-  property var lastIndex: ({ route: {}, trip: {}, stop: {} })
-  property var board: null
-  property bool loading: false
-  property string errorText: ""
-  property date lastUpdated: new Date(0)
-  property real nowMs: Date.now()
-  property int refreshGeneration: 0
+  RequestCoordinator {
+    id: requests
+    helper: root.fetchHelper
+  }
+
+  QtObject { id: stationsOwner }
+  QtObject { id: geocodeOwner }
+  QtObject { id: nearbyOwner }
+
+  QtObject {
+    id: settingsOwnerAdapter
+
+    function applySettingsEntry(entry) {
+      root.settings = entry
+      if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+        root.bar.shell.updateEntryInline(root.moduleName, entry)
+    }
+  }
+
+  MbtaSettings {
+    id: settingsAdapter
+    ownerAdapter: settingsOwnerAdapter
+    source: root.settings || ({})
+  }
+
+  // ---- Arrival-feed compatibility surface consumed by Panel, IPC, and the bar.
+  readonly property var board: arrivalFeed.board
+  readonly property bool loading: arrivalFeed.loading
+  readonly property string errorText: arrivalFeed.errorText
+  readonly property date lastUpdated: arrivalFeed.lastUpdated
+  readonly property real lastRefreshStartedMs: arrivalFeed.lastRefreshStartedMs
+  readonly property real nowMs: arrivalFeed.nowMs
+  readonly property string nextLabel: arrivalFeed.nextLabel
+  readonly property bool hasData: arrivalFeed.hasData
+
+  function refreshIfStale() { arrivalFeed.refreshIfStale() }
+  function refreshNow() { arrivalFeed.refreshNow() }
+
+  ArrivalFeed {
+    id: arrivalFeed
+    requests: requests
+    configuredStopIds: root.configuredStopIds
+    refreshSec: root.refreshSec
+    perGroupCap: root.perGroupCap
+    scheduleFallback: root.scheduleFallback
+    pinnedLineKey: root.pinnedLineKey
+  }
 
   // Station picker cache (full system station list, fetched once per session).
   property var stationsCache: null
   property bool stationsLoading: false
+  property real stationsLastAttemptMs: 0
 
   // ---- Nearby-station state
-  // Origin resolution order: coordinates saved by the weather plugin, a
-  // session-cached IP fix, then typed addresses via Nominatim.
-  property var weatherLocationState: null
-  property var ipLocation: null
+  // Nearby searches always use coordinates or an address supplied by the user.
   property var lastOrigin: null
   property var nearbyResults: []
   property bool nearbyLoading: false
   property bool locating: false
   property string nearbyError: ""
   property real pendingRadiusKm: 1
-  property bool pendingNearbyAfterLocate: false
 
-  // One expanded route strip is shared by the panel's departure rows.
-  property string activeLineKey: ""
-  property string activeLineRouteId: ""
-  property int activeLineDirectionId: -1
-  property string activeLineHeadsign: ""
-  property string activeLineStopId: ""
-  property var activeLineBadge: null
-  property var lineStops: []
-  property var lineVehicles: []
-  property bool lineLoading: false
-  property string lineError: ""
-  property bool lineVisible: false
-  property int lineGeneration: 0
+  // Compatibility surface while Panel remains hosted by the bar widget.
+  readonly property string activeLineKey: routeExplorer.activeLineKey
+  readonly property string activeLineHeadsign: routeExplorer.activeLineHeadsign
+  readonly property string activeLineStopId: routeExplorer.activeLineStopId
+  readonly property var activeLineBadge: routeExplorer.activeLineBadge
+  readonly property var lineStops: routeExplorer.lineStops
+  readonly property var lineVehicles: routeExplorer.lineVehicles
+  readonly property bool lineLoading: routeExplorer.lineLoading
+  readonly property string lineError: routeExplorer.lineError
+  readonly property bool lineVisible: routeExplorer.lineVisible
+  readonly property string activeLinePinKey: routeExplorer.activeLinePinKey
 
-  readonly property string nextLabel: pinnedLineKey !== ""
-    ? Mbta.pinnedNextLabel(board, pinnedLineKey)
-    : (board && board.nextLabel ? board.nextLabel : "")
-  readonly property bool hasData: board !== null && nextLabel !== ""
-  readonly property string activeLinePinKey: activeLineKey === "" ? "" : activeLineStopId + "|" + activeLineKey
-
-  function rebuildBoard() {
-    if (!root.lastRows || root.lastRows.length === 0) {
-      // Keep an empty-shaped board so the panel renders stop sections.
-      root.board = Mbta.buildBoard([], root.lastIndex, root.configuredStopIds, root.nowMs, root.perGroupCap)
-      return
-    }
-    root.board = Mbta.buildBoard(root.lastRows, root.lastIndex, root.configuredStopIds, root.nowMs, root.perGroupCap)
-  }
-
-  function fetchCommand(limitBytes, timeoutSec, url) {
-    return [root.fetchHelper, String(limitBytes), String(timeoutSec), url]
-  }
-
-  onNowMsChanged: rebuildBoard()
-  onConfiguredStopIdsChanged: rebuildBoard()
-
-  function refreshNow() {
-    if (predictionsProc.running) return
-    // An empty stop list would 400 against the API every cycle; the panel's
-    // "No stations yet" hint is the right surface for that state.
-    if (!root.configuredStopIds.length) {
-      root.loading = false
-      rebuildBoard()
-      return
-    }
-    root.loading = true
-    root.refreshGeneration++
-    predictionsProc.generation = root.refreshGeneration
-    var url = Mbta.predictionsUrl(root.configuredStopIds)
-    predictionsProc.command = fetchCommand(1048576, 8, url)
-    predictionsProc.running = true
-  }
-
-  function applyPredictions(raw, generation) {
-    if (generation !== root.refreshGeneration) return
-    root.loading = false
-    var trimmed = String(raw || "").trim()
-    if (trimmed === "" || !root.configuredStopIds.length) {
-      maybeFallbackToSchedules()
-      return
-    }
-    try {
-      var payload = JSON.parse(trimmed)
-      var index = Mbta.indexIncluded(payload.included)
-      var rows = Mbta.collectRows(payload, Date.now(), true)
-      root.lastIndex = index
-      root.lastRows = rows
-      if (rows.length === 0 && root.scheduleFallback) {
-        maybeFallbackToSchedules()
-        return
-      }
-      root.errorText = ""
-      root.lastUpdated = new Date()
-      rebuildBoard()
-    } catch (e) {
-      console.warn("[mbta] predictions parse failed:", e.message)
-      root.errorText = "MBTA response error"
-    }
-  }
-
-  function maybeFallbackToSchedules() {
-    if (!root.scheduleFallback || schedulesProc.running || !root.configuredStopIds.length) return
-    var window = Mbta.scheduleWindow(new Date())
-    var url = Mbta.schedulesUrl(root.configuredStopIds, window.min, window.max)
-    schedulesProc.command = fetchCommand(1048576, 8, url)
-    schedulesProc.generation = root.refreshGeneration
-    schedulesProc.running = true
-  }
-
-  function applySchedules(raw, generation) {
-    if (generation !== root.refreshGeneration) return
-    var trimmed = String(raw || "").trim()
-    if (trimmed === "") {
-      rebuildBoard()
-      return
-    }
-    try {
-      var payload = JSON.parse(trimmed)
-      root.lastIndex = Mbta.indexIncluded(payload.included)
-      root.lastRows = Mbta.collectRows(payload, Date.now(), false)
-      root.errorText = ""
-      root.lastUpdated = new Date()
-    } catch (e) {
-      root.errorText = "MBTA response error"
-    }
-    rebuildBoard()
+  RouteExplorer {
+    id: routeExplorer
+    requests: requests
+    board: root.board
+    activityMode: panelLoader.item ? panelLoader.item.activity.mode : "hidden"
   }
 
   function ensureStations() {
-    if (root.stationsCache !== null || stationsProc.running) return
+    if (root.stationsCache !== null || root.stationsLoading) return
+    if (root.stationsLastAttemptMs > 0 && Date.now() - root.stationsLastAttemptMs < 600000) return
+    root.stationsLastAttemptMs = Date.now()
     root.stationsLoading = true
-    stationsProc.command = fetchCommand(4194304, 15, Mbta.stationsUrl())
-    stationsProc.running = true
+    requests.request(stationsOwner, root.api.stations(), requests.interactive, function(outcome) {
+      root.stationsLoading = false
+      if (outcome.status === "ok") root.stationsCache = outcome.value
+      else console.warn("[mbta] station list unavailable:", outcome.error.kind)
+    })
   }
+
 
   function searchStations(query) {
     var q = String(query || "").replace(/^\s+|\s+$/g, "")
@@ -183,369 +135,91 @@ BarWidget {
       return true
     }
     var query = String(addressText || "").slice(0, 200).replace(/^\s+|\s+$/g, "")
-    if (query === "" || geocodeProc.running) return false
+    if (query === "") {
+      root.nearbyError = "Enter your location"
+      return false
+    }
+    if (root.locating) return false
+    var request = root.api.geocode(query)
     root.pendingRadiusKm = radiusKm
     root.locating = true
-    geocodeProc.command = fetchCommand(65536, 10, Mbta.geocodeUrl(query))
-    geocodeProc.running = true
-    return true
-  }
-
-  function useMyLocation(radiusKm) {
-    root.nearbyError = ""
-    var weatherLocation = root.weatherLocationState
-    if (weatherLocation && !isNaN(weatherLocation.latitude)) {
-      fetchNearby(
-        weatherLocation.latitude,
-        weatherLocation.longitude,
-        radiusKm,
-        "saved location" + (weatherLocation.name !== "" ? " · " + weatherLocation.name : "")
-      )
-      return true
-    }
-    if (root.ipLocation) {
-      fetchNearby(root.ipLocation.latitude, root.ipLocation.longitude, radiusKm, "IP location")
-      return true
-    }
-    if (ipLocProc.running) return false
-    root.pendingRadiusKm = radiusKm
-    root.pendingNearbyAfterLocate = true
-    root.locating = true
-    ipLocProc.command = fetchCommand(1024, 8, "https://ipinfo.io/loc")
-    ipLocProc.running = true
-    return true
+    return requests.request(geocodeOwner, request, requests.interactive, function(outcome) {
+      root.locating = false
+      if (outcome.status !== "ok" || !outcome.value.length) {
+        root.nearbyError = "Address not found"
+        return
+      }
+      var hit = outcome.value[0]
+      root.fetchNearby(hit.latitude, hit.longitude, root.pendingRadiusKm, hit.name)
+    }) > 0
   }
 
   function fetchNearby(latitude, longitude, radiusKm, sourceLabel) {
-    if (nearbyProc.running) return
+    if (root.nearbyLoading) return
     root.lastOrigin = {
       latitude: latitude,
       longitude: longitude,
       source: String(sourceLabel || "location")
     }
+    var request = root.api.nearby(latitude, longitude, radiusKm)
     root.nearbyLoading = true
-    nearbyProc.command = fetchCommand(1048576, 12,
-      Mbta.nearbyUrl(latitude, longitude, radiusKm))
-    nearbyProc.running = true
+    requests.request(nearbyOwner, request, requests.interactive, function(outcome) {
+      root.nearbyLoading = false
+      if (outcome.status !== "ok") {
+        root.nearbyResults = []
+        root.nearbyError = outcome.error.kind === "rate-limited"
+          ? "MBTA rate limit reached; retry shortly" : "MBTA request failed"
+        return
+      }
+      root.nearbyResults = outcome.value
+      root.nearbyError = root.nearbyResults.length ? "" : "No stations found in that radius"
+    })
   }
 
-  // Settings persistence follows the clock's cycleFormat: apply locally so the
-  // change is instant, then let shell.json echo the same value back.
-  function updateSettings(patch) {
-    var entry = {}
-    for (var key in root.settings)
-      if (key !== "id") entry[key] = root.settings[key]
-    for (var patchKey in patch) entry[patchKey] = patch[patchKey]
-
-    root.settings = entry
-    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
-      root.bar.shell.updateEntryInline(root.moduleName, entry)
-    return entry
-  }
+  function readSetting(name, fallback) { return settingsAdapter.value(name, fallback) }
+  function updateSettings(patch) { return settingsAdapter.update(patch) }
 
   function setStopIds(ids) {
-    updateSettings({ stopIds: Mbta.serializeStopIds(ids) })
+    settingsAdapter.setStopIds(ids)
     Qt.callLater(refreshNow)
   }
 
   function toggleStop(id) {
-    var ids = root.configuredStopIds.slice()
-    var at = ids.indexOf(id)
-    if (at >= 0) ids.splice(at, 1)
-    else ids.push(id)
-    setStopIds(ids)
+    if (settingsAdapter.toggleStop(id)) Qt.callLater(refreshNow)
   }
 
   function togglePinnedLine() {
-    if (root.activeLinePinKey === "") return
-    updateSettings({ pinnedLine: root.pinnedLineKey === root.activeLinePinKey ? "" : root.activeLinePinKey })
+    settingsAdapter.togglePinnedLine(root.activeLinePinKey)
   }
 
-  function toggleLine(group) {
-    if (!group) return
-    var groupKey = String(group.key)
-    var stopId = String(group.stopId || "")
-    var sameRow = root.lineVisible && root.activeLineKey === groupKey
-      && root.activeLineStopId === stopId
-
-    if (sameRow) {
-      closeLine()
-      return
-    }
-
-    // The route data is shared across configured stations. Move the selected
-    // station marker without duplicating or re-fetching the detail view.
-    if (root.lineVisible && root.activeLineKey === groupKey) {
-      root.activeLineStopId = stopId
-      return
-    }
-
-    // Replace the detail in place so the panel keeps a stable width and
-    // height while moving between routes.
-    if (lineStopsProc.running) lineStopsProc.running = false
-    if (lineVehiclesProc.running) lineVehiclesProc.running = false
-    openLine(group)
-  }
-
-  function closeLine() {
-
-    // Collapse the visual immediately. Model teardown and any next route load
-    // happen on a later tick so they cannot stall the click frame.
-    root.lineVisible = false
-    root.lineGeneration++
-    if (lineStopsProc.running) lineStopsProc.running = false
-    if (lineVehiclesProc.running) lineVehiclesProc.running = false
-    lineTransitionTimer.restart()
-  }
-
-  function openLine(group) {
-    if (!group) return
-    lineTransitionTimer.stop()
-    root.activeLineKey = String(group.key)
-    root.activeLineRouteId = String(group.routeId)
-    root.activeLineDirectionId = Number(group.directionId)
-    root.activeLineHeadsign = String(group.headsign || "")
-    root.activeLineStopId = String(group.stopId || "")
-    root.activeLineBadge = group.badge
-    root.lineStops = []
-    root.lineVehicles = []
-    root.lineError = ""
-    root.lineLoading = true
-    root.lineVisible = true
-    root.lineGeneration++
-    lineStopsProc.generation = root.lineGeneration
-    lineStopsProc.command = fetchCommand(1048576, 10,
-      Mbta.lineStopsUrl(root.activeLineRouteId, root.activeLineDirectionId))
-    lineStopsProc.running = true
-  }
-
-  Timer {
-    id: lineTransitionTimer
-    interval: 60
-    onTriggered: {
-      root.activeLineKey = ""
-      root.lineStops = []
-      root.lineVehicles = []
-    }
-  }
-
-  function refreshLineVehicles() {
-    if (root.activeLineKey === "" || !root.lineStops.length || lineVehiclesProc.running) return
-    lineVehiclesProc.command = fetchCommand(1048576, 8,
-      Mbta.vehiclesUrl(root.activeLineRouteId, root.activeLineDirectionId))
-    lineVehiclesProc.generation = root.lineGeneration
-    lineVehiclesProc.running = true
-  }
-
-  // Processes are declared before the timers on purpose: with
-  // triggeredOnStart, refreshTimer fires while the component tree is still
-  // being built, and sibling ids declared later would not resolve yet.
-  Process {
-    id: predictionsProc
-    property int generation: 0
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyPredictions(text, predictionsProc.generation)
-    }
-  }
-
-  Process {
-    id: schedulesProc
-    property int generation: 0
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applySchedules(text, schedulesProc.generation)
-    }
-  }
-
-  Process {
-    id: stationsProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.stationsLoading = false
-        var raw = String(text || "").trim()
-        if (raw === "") {
-          console.warn("[mbta] station list fetch returned nothing")
-          return
-        }
-        try {
-          var parsed = JSON.parse(raw)
-          root.stationsCache = Array.isArray(parsed.data) ? parsed.data.slice(0, 10000) : []
-        } catch (e) {
-          console.warn("[mbta] station list parse failed:", e.message)
-        }
-      }
-    }
-  }
-
-  Process {
-    id: weatherLocationProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.weatherLocationState = Mbta.parseWeatherLocation(text)
-    }
-  }
-
-  Timer {
-    id: tickTimer
-    interval: 5000
-    running: true
-    repeat: true
-    triggeredOnStart: false
-    onTriggered: root.nowMs = Date.now()
-  }
-
-  Timer {
-    id: refreshTimer
-    interval: root.refreshSec * 1000
-    running: true
-    repeat: true
-    triggeredOnStart: true
-    onTriggered: root.refreshNow()
-  }
-
-  // Read the small cross-plugin location file through a no-follow, regular-file
-  // adapter instead of retaining an arbitrary FileView body in the shell.
-  Timer {
-    interval: 1500
-    running: true
-    onTriggered: {
-      weatherLocationProc.command = [root.weatherReader,
-        Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"]
-      weatherLocationProc.running = true
-    }
-  }
-
-  function readSetting(name, fallback) {
-    return setting(name, fallback)
-  }
-
-  Process {
-    id: geocodeProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.locating = false
-        var hits = Mbta.parseGeocoding(text)
-        if (!hits.length) {
-          root.nearbyError = "Address not found"
-          return
-        }
-        fetchNearby(hits[0].latitude, hits[0].longitude, root.pendingRadiusKm, hits[0].name)
-      }
-    }
-  }
-
-  Process {
-    id: ipLocProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.locating = false
-        var coords = Mbta.parseIpLoc(text)
-        if (!coords) {
-          root.pendingNearbyAfterLocate = false
-          root.nearbyError = "Could not detect location"
-          return
-        }
-        root.ipLocation = coords
-        if (root.pendingNearbyAfterLocate) {
-          root.pendingNearbyAfterLocate = false
-          fetchNearby(coords.latitude, coords.longitude, root.pendingRadiusKm, "IP location")
-        }
-      }
-    }
-  }
-
-  Process {
-    id: nearbyProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.nearbyLoading = false
-        var raw = String(text || "").trim()
-        if (raw === "" || !root.lastOrigin) {
-          root.nearbyResults = []
-          return
-        }
-        try {
-          var payload = JSON.parse(raw)
-          root.nearbyResults = Mbta.collectNearbyStops(
-            payload, root.lastOrigin.latitude, root.lastOrigin.longitude)
-          if (root.nearbyResults.length === 0) root.nearbyError = "No stations found in that radius"
-        } catch (e) {
-          root.nearbyError = "MBTA response error"
-        }
-      }
-    }
-  }
-
-  Process {
-    id: lineStopsProc
-    property int generation: 0
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (lineStopsProc.generation !== root.lineGeneration) return
-        var raw = String(text || "").trim()
-        if (root.activeLineKey === "") return
-        try {
-          root.lineStops = Mbta.parseLineStops(JSON.parse(raw), root.activeLineDirectionId)
-          if (!root.lineStops.length) {
-            root.lineError = "No route stops found"
-            root.lineLoading = false
-            return
-          }
-          root.refreshLineVehicles()
-        } catch (e) {
-          root.lineLoading = false
-          root.lineError = "Could not load route stops"
-        }
-      }
-    }
-  }
-
-  Process {
-    id: lineVehiclesProc
-    property int generation: 0
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        if (lineVehiclesProc.generation !== root.lineGeneration) return
-        if (root.activeLineKey === "") return
-        var raw = String(text || "").trim()
-        try {
-          root.lineVehicles = Mbta.parseVehicles(JSON.parse(raw), root.lineStops)
-          root.lineError = ""
-        } catch (e) {
-          root.lineError = "Live vehicles unavailable"
-        }
-        root.lineLoading = false
-      }
-    }
-  }
-
-  Timer {
-    interval: 20000
-    running: root.activeLineKey !== ""
-    repeat: true
-    onTriggered: root.refreshLineVehicles()
-  }
+  function toggleLine(group) { routeExplorer.toggleLine(group) }
+  function closeLine() { routeExplorer.closeLine() }
 
   // ---- Panel lifecycle plumbing (shape contract for summon/hide routing).
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  property string pendingPanelAction: ""
 
   function open() {
-    if (panelLoader.item && panelLoader.item.openFromHotkey) panelLoader.item.openFromHotkey()
+    if (panelLoader.item && panelLoader.item.openFromHotkey) {
+      panelLoader.item.openFromHotkey()
+      return
+    }
+    root.pendingPanelAction = "open"
+    panelLoader.active = true
   }
 
   function close() {
+    root.pendingPanelAction = ""
     if (panelLoader.item && panelLoader.item.close) panelLoader.item.close()
   }
 
   function toggle() {
-    if (panelLoader.item && panelLoader.item.toggle) panelLoader.item.toggle()
+    if (panelLoader.item && panelLoader.item.toggle) {
+      panelLoader.item.toggle()
+      return
+    }
+    root.pendingPanelAction = "open"
+    panelLoader.active = true
   }
 
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
@@ -563,6 +237,14 @@ BarWidget {
     if ("hostWidget" in target) target.hostWidget = root
   }
 
+  function completePanelLoad() {
+    root.injectPanel()
+    var action = root.pendingPanelAction
+    root.pendingPanelAction = ""
+    if (action === "open" && panelLoader.item && panelLoader.item.openFromHotkey)
+      panelLoader.item.openFromHotkey()
+  }
+
   // WidgetButton's default width only accounts for one icon. Reserve the
   // custom icon-and-countdown row so the next bar module cannot overlap it.
   implicitWidth: contentRow.implicitWidth + Style.space(14)
@@ -573,12 +255,12 @@ BarWidget {
 
   Loader {
     id: panelLoader
-    active: true
+    active: false
     source: Qt.resolvedUrl("Panel.qml")
     visible: false
     onLoaded: {
       root.injectPanel()
-      Qt.callLater(root.injectPanel)
+      Qt.callLater(root.completePanelLoad)
     }
   }
 

@@ -80,6 +80,18 @@ var cases = [
     assert.deepStrictEqual(Mbta.parseStopIds(""), [])
   }],
 
+  ["untrusted identifier dictionaries have no prototype keys", function() {
+    assert.deepStrictEqual(Mbta.parseStopIds("__proto__,constructor,toString"),
+      ["__proto__", "constructor", "toString"])
+    var index = Mbta.indexIncluded([
+      { id: "__proto__", type: "route", attributes: {} },
+      { id: "constructor", type: "trip", attributes: {} }
+    ])
+    assert.strictEqual(Object.getPrototypeOf(index.route), null)
+    assert.strictEqual(index.route.__proto__.id, "__proto__")
+    assert.strictEqual(index.trip.constructor.id, "constructor")
+  }],
+
   ["serializeStopIds round-trips through parseStopIds", function() {
     var ids = ["place-dwnxg", "place-pktrm"]
     assert.strictEqual(Mbta.parseStopIds(Mbta.serializeStopIds(ids)).join(","), ids.join(","))
@@ -89,22 +101,27 @@ var cases = [
     var url = Mbta.predictionsUrl(["place-dwnxg", "place-pktrm"], "")
     assert.ok(url.indexOf("https://api-v3.mbta.com/predictions?") === 0, url)
     assert.ok(url.indexOf("filter%5Bstop%5D=place-dwnxg%2Cplace-pktrm") > 0, url)
-    assert.ok(url.indexOf("sort=arrival_time") > 0, url)
+    assert.ok(url.indexOf("sort=time") > 0, url)
     assert.ok(url.indexOf("include=route%2Ctrip%2Cstop") > 0 || url.indexOf("include=route,trip,stop") > 0, url)
+    assert.ok(url.indexOf("fields%5Bprediction%5D=") > 0, url)
+    assert.ok(url.indexOf("fields%5Broute%5D=") > 0, url)
     assert.ok(url.indexOf("api_key") < 0, url)
   }],
 
   ["schedulesUrl bounds the window", function() {
-    var url = Mbta.schedulesUrl(["place-sstat"], "05:10", "07:20", null)
+    var url = Mbta.schedulesUrl(["place-sstat"], "2026-08-23", "05:10", "07:20")
     assert.ok(url.indexOf("/schedules?") > 0, url)
+    assert.ok(url.indexOf("date%5D=2026-08-23") > 0, url)
     assert.ok(url.indexOf("min_time%5D=05%3A10") > 0 || url.indexOf("min_time%5D=05:10") > 0, url)
     assert.ok(url.indexOf("max_time%5D=07%3A20") > 0 || url.indexOf("max_time%5D=07:20") > 0, url)
+    assert.ok(url.indexOf("fields%5Bschedule%5D=") > 0, url)
+    assert.ok(url.indexOf("sort=time") > 0, url)
   }],
 
   ["stationsUrl covers rail stations and street bus stops with sparse fields", function() {
     var url = Mbta.stationsUrl("")
     assert.ok(url.indexOf("location_type%5D=0,1") > 0, url)
-    assert.ok(url.indexOf("fields%5Bstop%5D=name,municipality,location_type") > 0, url)
+    assert.ok(url.indexOf("fields%5Bstop%5D=name,municipality,parent_station") > 0, url)
   }],
 
   ["dedupeStops collapses platforms into their station's name", function() {
@@ -154,7 +171,9 @@ var cases = [
 
   ["parentStationMap harvests platform parents", function() {
     var index = Mbta.indexIncluded([includedStop("70078", "Downtown Crossing", "place-dwnxg")])
-    assert.deepStrictEqual(Mbta.parentStationMap(index), { "place-dwnxg": "Downtown Crossing" })
+    var parents = Mbta.parentStationMap(index)
+    assert.strictEqual(Object.getPrototypeOf(parents), null)
+    assert.strictEqual(parents["place-dwnxg"], "Downtown Crossing")
   }],
 
   ["resolveConfiguredStopId climbs to the configured parent", function() {
@@ -281,13 +300,24 @@ var cases = [
     assert.strictEqual(board.realtime, true)
   }],
 
+  ["buildBoard drops rows that expired since the last fetch", function() {
+    var index = Mbta.indexIncluded([
+      includedRoute("77", { short_name: "77", type: 3 }),
+      includedStop("stop-a", "Arlington Heights", null)
+    ])
+    var rows = [{ routeId: "77", tripId: "past", stopId: "stop-a", headsign: "Harvard",
+      directionId: 1, timeMs: NOW - 1000, status: "", realtime: true }]
+    var board = Mbta.buildBoard(rows, index, ["stop-a"], NOW, 3)
+    assert.strictEqual(board.stops[0].groups.length, 0)
+  }],
+
   ["pinnedNextLabel selects one station and destination row", function() {
     var board = {
       nextLabel: "1m",
       stops: [
         { id: "place-a", groups: [
           { stopId: "place-a", key: "Red|0|Ashmont", times: [{ label: "4m" }] },
-          { stopId: "place-a", key: "Red|1|Alewife", times: [{ label: "7m" }] }
+          { stopId: "place-a", key: "Red|1|Alewife", times: [{ label: "7m", ms: NOW + 7 * 60000 }] }
         ] },
         { id: "place-b", groups: [
           { stopId: "place-b", key: "Red|1|Alewife", times: [{ label: "2m" }] }
@@ -297,14 +327,18 @@ var cases = [
     var pin = Mbta.linePinKey(board.stops[0].groups[1])
     assert.strictEqual(pin, "place-a|Red|1|Alewife")
     assert.strictEqual(Mbta.pinnedNextLabel(board, pin), "7m")
+    assert.strictEqual(Mbta.pinnedNextLabel(board, pin, NOW + 5 * 60000), "2m")
     assert.strictEqual(Mbta.pinnedNextLabel(board, "place-b|Red|1|Alewife"), "2m")
     assert.strictEqual(Mbta.pinnedNextLabel(board, "missing"), "")
   }],
 
-  ["scheduleWindow spans now to now+2h in HH:MM", function() {
+  ["scheduleWindow covers two hours through the schedule cache lifetime", function() {
     var win = Mbta.scheduleWindow(new Date(2026, 7, 22, 7, 42))
     assert.strictEqual(win.min, "07:42")
-    assert.strictEqual(win.max, "09:42")
+    assert.strictEqual(win.max, "09:47")
+    assert.strictEqual(win.date, "2026-08-22")
+    var overnight = Mbta.scheduleWindow(new Date(2026, 7, 22, 23, 42))
+    assert.deepStrictEqual(overnight, { date: "2026-08-22", min: "23:42", max: "25:47" })
   }],
 
   ["filterStations ranks prefix over substring", function() {
@@ -397,21 +431,6 @@ var cases = [
     assert.strictEqual(Mbta.parseLatLon(null), null)
   }],
 
-  ["parseIpLoc reads ipinfo.io/loc bodies", function() {
-    assert.deepStrictEqual(Mbta.parseIpLoc("42.4239,-71.1742\n"), { latitude: 42.4239, longitude: -71.1742 })
-    assert.strictEqual(Mbta.parseIpLoc(""), null)
-    assert.strictEqual(Mbta.parseIpLoc("error"), null)
-  }],
-
-  ["parseWeatherLocation honors the weather plugin's saved coordinates", function() {
-    var good = Mbta.parseWeatherLocation('{"name":"Arlington","latitude":42.4142,"longitude":-71.1563}')
-    assert.strictEqual(good.name, "Arlington")
-    assert.strictEqual(good.latitude, 42.4142)
-    assert.strictEqual(Mbta.parseWeatherLocation('{"name":"Boston"}'), null)
-    assert.strictEqual(Mbta.parseWeatherLocation("not json"), null)
-    assert.strictEqual(Mbta.parseWeatherLocation(""), null)
-  }],
-
   ["radiusDegrees converts km and clamps extremes", function() {
     assert.ok(Math.abs(Mbta.radiusDegrees(1) - 1 / 111.32) < 1e-9)
     assert.ok(Math.abs(Mbta.radiusDegrees(0.5) - 0.5 / 111.32) < 1e-9)
@@ -442,6 +461,10 @@ var cases = [
     assert.ok(url.indexOf("latitude%5D=42.3554") > 0, url)
     assert.ok(url.indexOf("longitude%5D=-71.0605") > 0, url)
     assert.ok(url.indexOf("radius%5D=" + Mbta.radiusDegrees(1)) > 0, url)
+    assert.ok(url.indexOf("fields%5Bstop%5D=") > 0, url)
+    assert.ok(url.indexOf("location_type%5D=0,1") > 0, url)
+    assert.ok(url.indexOf("sort=distance") > 0, url)
+    assert.ok(url.indexOf("page%5Blimit%5D=500") > 0, url)
   }],
 
   ["geocodeUrl encodes Nominatim queries", function() {
@@ -506,30 +529,48 @@ var cases = [
   // ---- Strip map ----
 
   ["lineStopsUrl and vehiclesUrl target route+direction", function() {
-    var stops = Mbta.lineStopsUrl("Red", 1, "")
-    assert.ok(stops.indexOf("/stops?") > 0, stops)
-    assert.ok(stops.indexOf("route%5D=Red") > 0, stops)
+    var stops = Mbta.lineStopsUrl("trip/with spaces")
+    assert.ok(stops.indexOf("/trips/trip%2Fwith%20spaces?") > 0, stops)
+    assert.ok(stops.indexOf("include=stops") > 0, stops)
+    assert.ok(stops.indexOf("fields%5Btrip%5D=stops") > 0, stops)
+    assert.ok(stops.indexOf("fields%5Bstop%5D=name,parent_station") > 0, stops)
     var vehicles = Mbta.vehiclesUrl("77", 0, "k")
     assert.ok(vehicles.indexOf("/vehicles?") > 0, vehicles)
     assert.ok(vehicles.indexOf("route%5D=77") > 0, vehicles)
     assert.ok(vehicles.indexOf("direction_id%5D=0") > 0, vehicles)
     assert.ok(vehicles.indexOf("include=stop") > 0, vehicles)
+    assert.ok(vehicles.indexOf("fields%5Bvehicle%5D=") > 0, vehicles)
+    assert.ok(vehicles.indexOf("page%5Blimit%5D=200") > 0, vehicles)
   }],
 
-  ["parseLineStops keeps order and drops unnamed entries", function() {
+  ["parseLineStops preserves the API's directional order", function() {
     var stops = Mbta.parseLineStops({
-      data: [
-        { id: "place-alewle", attributes: { name: "Alewife" } },
-        { id: "x", attributes: { name: "" } },
-        { id: "place-davis", attributes: { name: "Davis" } },
-        null
+      data: { id: "trip-77", type: "trip", relationships: { stops: { data: [
+        { id: "heights" }, { id: "porter" }, { id: "harvard" }
+      ] } } },
+      included: [
+        { id: "heights", type: "stop", attributes: { name: "Arlington Heights" } },
+        { id: "porter", type: "stop", attributes: { name: "Porter" } },
+        { id: "harvard", type: "stop", attributes: { name: "Harvard" } }
       ]
     })
-    assert.deepStrictEqual(stops.map(function(s) { return s.name }), ["Alewife", "Davis"])
-    assert.deepStrictEqual(Mbta.parseLineStops({ data: [
-      { id: "a", attributes: { name: "A" } },
-      { id: "b", attributes: { name: "B" } }
-    ] }, 1).map(function(s) { return s.name }), ["B", "A"])
+    assert.deepStrictEqual(stops.map(function(s) { return s.name }),
+      ["Arlington Heights", "Porter", "Harvard"])
+  }],
+
+  ["parseLineStops collapses rail platforms to parent stations", function() {
+    var stops = Mbta.parseLineStops({
+      data: { relationships: { stops: { data: [{ id: "70077" }, { id: "70075" }] } } },
+      included: [
+        { id: "70077", type: "stop", attributes: { name: "Downtown Crossing" }, relationships: {
+          parent_station: { data: { id: "place-dwnxg" } }
+        } },
+        { id: "70075", type: "stop", attributes: { name: "South Station" }, relationships: {
+          parent_station: { data: { id: "place-sstat" } }
+        } }
+      ]
+    })
+    assert.deepStrictEqual(stops.map(function(s) { return s.id }), ["place-dwnxg", "place-sstat"])
   }],
 
   ["parseVehicles places stopped and moving trains on the strip", function() {

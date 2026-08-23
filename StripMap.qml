@@ -16,6 +16,7 @@ Item {
 
   readonly property color routeColor: routeColorHex.length === 6 ? ("#" + routeColorHex) : "#7C878E"
   readonly property real rowHeight: Style.space(34)
+  readonly property bool blockingError: root.errorText !== "" && root.stops.length === 0
 
   implicitHeight: header.implicitHeight + Style.space(8) + Math.min(Style.space(310), stripContent.height)
 
@@ -45,6 +46,16 @@ Item {
         font.bold: true
         elide: Text.ElideRight
       }
+
+      Text {
+        visible: root.errorText !== "" && !root.blockingError
+        width: Math.max(0, parent.width - x)
+        text: root.errorText
+        color: Color.urgent
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
     }
 
     Flickable {
@@ -59,11 +70,11 @@ Item {
       Item {
         id: stripContent
         width: stripViewport.width
-        height: root.errorText !== "" ? errorLabel.implicitHeight : Math.max(root.rowHeight, root.stops.length * root.rowHeight)
+        height: root.blockingError ? errorLabel.implicitHeight : Math.max(root.rowHeight, root.stops.length * root.rowHeight)
 
         Text {
           id: errorLabel
-          visible: root.errorText !== ""
+          visible: root.blockingError
           text: root.errorText
           color: Color.urgent
           font.family: Style.font.family
@@ -71,7 +82,7 @@ Item {
         }
 
         Repeater {
-          model: root.errorText === "" ? root.stops : []
+          model: root.blockingError ? [] : root.stops
 
           Item {
             required property int index
@@ -120,9 +131,7 @@ Item {
           model: root.errorText === "" ? root.vehicles : []
 
           Rectangle {
-            required property int index
             required property var modelData
-            property real pulsePhase: 0
             x: Style.space(7)
             y: root.rowHeight / 2 - height / 2 + modelData.fraction * Math.max(0, stripContent.height - root.rowHeight)
             width: Style.space(19)
@@ -140,17 +149,9 @@ Item {
               color: "transparent"
               border.width: 1
               border.color: root.routeColor
-              scale: 1 + parent.pulsePhase * 0.5
-              opacity: 0.32 * (1 - parent.pulsePhase)
+              scale: 1.35
+              opacity: 0.24
               z: -1
-            }
-
-            SequentialAnimation on pulsePhase {
-              running: root.visible
-              loops: Animation.Infinite
-              PauseAnimation { duration: index * 160 }
-              NumberAnimation { from: 0; to: 1; duration: 1250; easing.type: Easing.OutCubic }
-              PauseAnimation { duration: 650 }
             }
 
             Text {
