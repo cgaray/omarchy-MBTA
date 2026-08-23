@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.cgaray.mbta",
+  "name": "MBTA",
+  "version": "1.0.0",
+  "author": "Christopher Garay",
+  "license": "MIT",
+  "description": "Live MBTA arrival times for your stations in the Omarchy bar — subway, Silver Line, bus, commuter rail, and ferry countdowns with a departure-board panel and station picker (search by name or scan around any address).",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "MBTA",
+    "description": "Next train at your stops with live MBTA predictions; click for the full departure board and station picker.",
+    "category": "Transit",
+    "aliases": [
+      "mbta",
+      "transit",
+      "train",
+      "subway",
+      "t",
+      "commuter rail"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "stopIds": "place-dwnxg,place-pktrm,place-gover,place-haecl,place-sstat",
+      "refreshSec": 30,
+      "perGroupCap": 3,
+      "scheduleFallback": true
+    },
+    "schema": [
+      {
+        "key": "stopIds",
+        "type": "string",
+        "label": "Stops (comma-separated MBTA stop IDs)",
+        "defaultValue": "place-dwnxg,place-pktrm,place-gover,place-haecl,place-sstat",
+        "description": "Stations shown on the board. Easiest edited through the panel's Manage Stations picker; each id is an MBTA stop like place-dwnxg or place-north."
+      },
+      {
+        "key": "refreshSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 15,
+        "max": 300,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often live predictions are fetched from api-v3.mbta.com. Countdown labels re-render every few seconds between fetches without new requests."
+      },
+      {
+        "key": "perGroupCap",
+        "type": "integer",
+        "label": "Departures per line/direction row",
+        "min": 1,
+        "max": 6,
+        "step": 1,
+        "defaultValue": 3,
+        "description": "Countdown chips kept per route+direction grouping on the panel."
+      },
+      {
+        "key": "scheduleFallback",
+        "type": "boolean",
+        "label": "Fall back to schedules when there are no predictions",
+        "defaultValue": true,
+        "description": "Late night, when real-time data goes quiet, show scheduled departures instead of an empty board."
+      },
+      {
+        "key": "pinnedLine",
+        "type": "string",
+        "label": "Pinned arrival row",
+        "defaultValue": "",
+        "description": "Internal station and route selection used for the bar countdown. Set or clear it with the Pin control in the arrivals panel."
+      }
+    ]
+  }
+}
