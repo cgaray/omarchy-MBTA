@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.cgaray.mbta",
   "name": "MBTA",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Christopher Garay",
   "license": "MIT",
   "description": "Live MBTA arrival times for your stations in the Omarchy bar — subway, Silver Line, bus, commuter rail, and ferry countdowns with a departure-board panel and station picker (search by name or scan around any address).",

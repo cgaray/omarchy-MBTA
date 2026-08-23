@@ -12,7 +12,7 @@ import urllib.request
 
 
 ALLOWED_HOSTS = {"api-v3.mbta.com", "nominatim.openstreetmap.org"}
-MBTA_RATE_LIMIT = 8
+MBTA_RATE_LIMIT = 12
 MBTA_RATE_WINDOW = 60
 
 

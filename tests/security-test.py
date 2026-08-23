@@ -47,6 +47,21 @@ def main():
         previous_runtime = os.environ.get("XDG_RUNTIME_DIR")
         os.environ["XDG_RUNTIME_DIR"] = directory
         try:
+            # One arrivals request plus five newly opened lines (stops + vehicles)
+            # is a normal interactive burst and must not trip the local limiter.
+            for _ in range(11):
+                require(fetch_module.reserve_mbta_request(20),
+                        "normal line browsing should fit inside the local MBTA budget")
+        finally:
+            if previous_runtime is None:
+                os.environ.pop("XDG_RUNTIME_DIR", None)
+            else:
+                os.environ["XDG_RUNTIME_DIR"] = previous_runtime
+
+    with tempfile.TemporaryDirectory() as directory:
+        previous_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = directory
+        try:
             for _ in range(fetch_module.MBTA_RATE_LIMIT):
                 require(fetch_module.reserve_mbta_request(20),
                         "requests inside the local MBTA budget should be admitted")

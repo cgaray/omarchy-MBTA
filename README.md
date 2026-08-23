@@ -77,7 +77,7 @@ Predictions are requested at startup and every 60–300 seconds (60 seconds by
 default). Empty predictions may use a schedule response cached for five
 minutes. A visible line view requests vehicles every 60 seconds; polling stops
 when the panel or line view is hidden. All MBTA requests share a conservative
-rolling budget of 8 requests per minute, below the anonymous API limit of 20;
+rolling budget of 12 requests per minute, below the anonymous API limit of 20;
 throttled line details retry without sending additional requests.
 Address requests only occur after the corresponding user action.
 
