@@ -17,7 +17,7 @@ Item {
   property int resultIndex: -1
   property string addressText: ""
   property string radiusText: "1"
-  readonly property bool stationsReady: !!root.feed && root.feed.stationsCache !== null
+  readonly property bool stationsReady: !!root.feed && root.feed.finder.stationsCache !== null
 
   signal focusIntent(string target)
 
@@ -88,11 +88,11 @@ Item {
 
   function runStationSearch() {
     if (!root.feed) return
-    if (root.stationQuery.trim() !== "" && root.feed.stationsCache === null) {
-      root.feed.ensureStations()
+    if (root.stationQuery.trim() !== "" && root.feed.finder.stationsCache === null) {
+      root.feed.finder.ensureStations()
       return
     }
-    root.stationResults = root.feed.searchStations(root.stationQuery)
+    root.stationResults = root.feed.finder.searchStations(root.stationQuery)
     root.resultIndex = root.stationResults.length > 0 ? 0 : -1
   }
 
@@ -108,7 +108,7 @@ Item {
     if (!root.feed) return false
     var address = root.addressText
     var radiusKm = root.parseRadius(root.radiusText)
-    var started = root.feed.findNearby(address, radiusKm)
+    var started = root.feed.finder.findNearby(address, radiusKm)
     if (started && root.preferences) root.preferences.rememberNearby(address, radiusKm)
     return started
   }
@@ -118,20 +118,20 @@ Item {
     var location = root.preferences.location
     root.addressText = location
     var radiusKm = root.parseRadius(root.radiusText)
-    var started = root.feed.findNearby(location, radiusKm)
+    var started = root.feed.finder.findNearby(location, radiusKm)
     if (started) root.preferences.rememberRadius(radiusKm)
     return started
   }
 
   function activeResultCount() {
     return root.pickerMode === "name" ? root.stationResults.length
-      : (root.feed ? root.feed.nearbyResults.length : 0)
+      : (root.feed ? root.feed.finder.nearbyResults.length : 0)
   }
 
   function pickResult(at) {
     if (!root.feed || !root.preferences || at < 0 || at >= root.activeResultCount()) return
     var stationId = root.pickerMode === "name"
-      ? root.stationResults[at].id : root.feed.nearbyResults[at].id
+      ? root.stationResults[at].id : root.feed.finder.nearbyResults[at].id
     if (root.preferences.toggleStop(stationId) && root.feed.refreshNow)
       Qt.callLater(root.feed.refreshNow)
     if (root.pickerMode === "name") searchDebounce.restart()

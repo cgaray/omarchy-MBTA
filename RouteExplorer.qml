@@ -14,7 +14,8 @@ Item {
   required property var requests
   property var board: null
   property string activityMode: "hidden"
-  readonly property var api: MbtaApi.create(Mbta)
+  // Injected by the host so all workflows share one descriptor seam.
+  property var api: MbtaApi.create(Mbta)
 
   property string activeLineKey: ""
   property string activeLineRouteId: ""

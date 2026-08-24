@@ -258,6 +258,10 @@ Panel {
             cursorShape: Qt.PointingHandCursor
             hoverEnabled: true
             onClicked: root.managing ? panelSession.stopManaging() : panelSession.startManaging()
+
+            Accessible.role: Accessible.Button
+            Accessible.name: root.managing ? "Done managing stations" : "Manage stations"
+            Accessible.onPressAction: root.managing ? panelSession.stopManaging() : panelSession.startManaging()
           }
         }
 
@@ -292,6 +296,10 @@ Panel {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
             onClicked: if (root.feed) root.feed.refreshNow()
+
+            Accessible.role: Accessible.Button
+            Accessible.name: "Refresh departures"
+            Accessible.onPressAction: if (root.feed) root.feed.refreshNow()
           }
         }
       }
@@ -445,8 +453,9 @@ Panel {
             Rectangle {
               width: parent.width
               height: Math.max(Style.space(24), parent.height * arrivalsViewport.height / arrivalsViewport.contentHeight)
-              y: (parent.height - height) * arrivalsViewport.contentY
-                / (arrivalsViewport.contentHeight - arrivalsViewport.height)
+              y: arrivalsViewport.contentHeight <= arrivalsViewport.height ? 0
+                : (parent.height - height) * arrivalsViewport.contentY
+                  / (arrivalsViewport.contentHeight - arrivalsViewport.height)
               radius: width / 2
               color: Color.accent
             }
@@ -494,7 +503,10 @@ Panel {
             Rectangle {
               id: pinLineButton
               anchors.verticalCenter: parent.verticalCenter
-              readonly property bool pinned: root.feed && root.feed.pinnedLineKey === root.feed.activeLinePinKey
+              // activeLineKey is cleared briefly during close transitions;
+              // without this guard both keys compare "" === "" and flash Pinned.
+              readonly property bool pinned: root.feed && root.feed.activeLineKey !== ""
+                && root.feed.pinnedLineKey === root.feed.activeLinePinKey
               width: pinLineLabel.implicitWidth + Style.space(12)
               height: Style.space(24)
               radius: height / 2
@@ -518,6 +530,10 @@ Panel {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: panelSession.togglePinnedLine()
+
+                Accessible.role: Accessible.Button
+                Accessible.name: pinLineButton.pinned ? "Unpin this departure row from the bar" : "Pin this departure row to the bar"
+                Accessible.onPressAction: panelSession.togglePinnedLine()
               }
             }
 
@@ -543,6 +559,10 @@ Panel {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: if (root.feed) root.feed.closeLine()
+
+                Accessible.role: Accessible.Button
+                Accessible.name: boardLayout.sideBySide ? "Close line details" : "Back to arrivals"
+                Accessible.onPressAction: if (root.feed) root.feed.closeLine()
               }
             }
           }
@@ -606,6 +626,11 @@ Panel {
                 cursorShape: Qt.PointingHandCursor
                 hoverEnabled: true
                 onClicked: panelSession.setPickerMode(modeTab.modelData.mode)
+
+                Accessible.role: Accessible.Button
+                Accessible.name: "Search stations " + modeTab.modelData.label
+                  + (modeTab.active ? ", active" : "")
+                Accessible.onPressAction: panelSession.setPickerMode(modeTab.modelData.mode)
               }
             }
           }
@@ -651,7 +676,7 @@ Panel {
             selectedIndex: root.resultIndex
             configuredStopIds: root.configuredStopIds
             emptyText: root.stationQuery !== "" && root.stationResults.length === 0
-              ? (root.feed && root.feed.stationsLoading ? "Loading stations…" : "No stations match") : ""
+              ? (root.feed && root.feed.finder.stationsLoading ? "Loading stations…" : "No stations match") : ""
             onPick: function(at) { panelSession.pickResult(at) }
             onHoveredRow: function(at) { panelSession.resultIndex = at }
           }
@@ -675,16 +700,27 @@ Panel {
               text: panelSession.addressText
               onTextChanged: panelSession.addressText = text
 
-              Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
-                  if (text !== "") { text = "" }
-                  else panelSession.stopManaging()
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                  panelSession.triggerNearbySearch()
-                  event.accepted = true
+                Keys.onPressed: function(event) {
+                  if (event.key === Qt.Key_Escape) {
+                    if (text !== "") { text = "" }
+                    else panelSession.stopManaging()
+                    event.accepted = true
+                  } else if (event.key === Qt.Key_Down) {
+                    panelSession.moveResultSelection(1)
+                    event.accepted = true
+                  } else if (event.key === Qt.Key_Up) {
+                    panelSession.moveResultSelection(-1)
+                    event.accepted = true
+                  } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    // Enter searches first; once results exist it picks the
+                    // highlighted row instead of re-running the search.
+                    if (panelSession.activeResultCount() > 0 && root.resultIndex >= 0)
+                      panelSession.pickResult(root.resultIndex)
+                    else
+                      panelSession.triggerNearbySearch()
+                    event.accepted = true
+                  }
                 }
-              }
             }
 
             Item {
@@ -733,6 +769,10 @@ Panel {
                 cursorShape: Qt.PointingHandCursor
                 hoverEnabled: true
                 onClicked: panelSession.useSavedLocation()
+
+                Accessible.role: Accessible.Button
+                Accessible.name: "Search near your saved location"
+                Accessible.onPressAction: panelSession.useSavedLocation()
               }
             }
 
@@ -760,6 +800,10 @@ Panel {
                 cursorShape: Qt.PointingHandCursor
                 hoverEnabled: true
                 onClicked: panelSession.triggerNearbySearch()
+
+                Accessible.role: Accessible.Button
+                Accessible.name: "Find nearby stations"
+                Accessible.onPressAction: panelSession.triggerNearbySearch()
               }
             }
           }
@@ -768,21 +812,69 @@ Panel {
             width: parent.width
             text: {
               if (!root.feed) return ""
-              if (root.feed.locating) return "Finding location…"
-              if (root.feed.nearbyLoading) return "Scanning stops…"
-              if (root.feed.nearbyError !== "") return root.feed.nearbyError
-              if (root.feed.lastOrigin) return "Origin: " + root.feed.lastOrigin.source
+              if (root.feed.finder.locating) return "Finding location…"
+              if (root.feed.finder.nearbyLoading) return "Scanning stops…"
+              if (root.feed.finder.nearbyError !== "") return root.feed.finder.nearbyError
+              if (root.feed.finder.geocodeCandidates.length > 0) return "Several places match — pick one"
+              if (root.feed.finder.lastOrigin) return "Origin: " + root.feed.finder.lastOrigin.source
               return "Enter an address, paste coordinates, or use ⌖"
             }
             textFormat: Text.PlainText
-            color: root.feed && root.feed.nearbyError !== "" ? Color.urgent : Color.muted
+            color: root.feed && root.feed.finder.nearbyError !== "" ? Color.urgent : Color.muted
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
 
+          Column {
+            visible: root.feed && root.feed.finder.geocodeCandidates.length > 0
+            width: parent.width
+            spacing: Style.space(2)
+
+            Repeater {
+              model: root.feed ? root.feed.finder.geocodeCandidates : []
+
+              Rectangle {
+                id: candidateRow
+                required property int index
+                required property var modelData
+                width: parent.width
+                height: Style.space(24)
+                radius: Math.min(4, Style.cornerRadius)
+                color: candidateArea.containsMouse
+                  ? Style.hoverFillFor(root.barForeground, Color.accent)
+                  : Qt.alpha(root.barForeground, 0.04)
+
+                Text {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(8)
+                  anchors.rightMargin: Style.space(8)
+                  text: candidateRow.modelData.name
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
+                  color: root.barForeground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  verticalAlignment: Text.AlignVCenter
+                }
+
+                MouseArea {
+                  id: candidateArea
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  hoverEnabled: true
+                  onClicked: if (root.feed) root.feed.finder.useGeocodeCandidate(candidateRow.index)
+                }
+
+                Accessible.role: Accessible.Button
+                Accessible.name: candidateRow.modelData.name
+                Accessible.onPressAction: if (root.feed) root.feed.finder.useGeocodeCandidate(candidateRow.index)
+              }
+            }
+          }
+
           StationResultsView {
             width: parent.width
-            results: root.feed ? root.feed.nearbyResults : []
+            results: root.feed ? root.feed.finder.nearbyResults : []
             selectedIndex: root.resultIndex
             configuredStopIds: root.configuredStopIds
             showDistances: true
@@ -842,6 +934,10 @@ Panel {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
                 onClicked: panelSession.toggleStop(chip.modelData)
+
+                Accessible.role: Accessible.Button
+                Accessible.name: "Remove " + chip.chipName + " from my stations"
+                Accessible.onPressAction: panelSession.toggleStop(chip.modelData)
               }
             }
           }

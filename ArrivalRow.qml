@@ -25,6 +25,16 @@ Item {
   property real spacing: Style.space(8)
   height: Style.space(34)
 
+  readonly property string primaryLabel: root.group && root.group.times
+    && root.group.times.length > 0 && root.nowMs > 0
+    ? Mbta.countdownLabel(root.group.times[0].ms - root.nowMs) : ""
+
+  readonly property string accessibleText: (root.group && root.group.badge
+      ? root.group.badge.label + " " : "")
+    + (root.group && root.group.headsign !== "" ? "toward " + root.group.headsign : "Departures")
+    + (primaryLabel !== "" ? ", next " + primaryLabel : "")
+    + (root.selected ? ", selected" : "")
+
   Rectangle {
     id: background
     anchors.fill: parent
@@ -73,13 +83,32 @@ Item {
     Text {
       anchors.verticalCenter: parent.verticalCenter
       width: Math.max(0, contentRow.width - badgeSlot.width - timeCluster.width
-        - toggleIndicator.width - root.spacing * 3)
+        - toggleIndicator.width - (statusLabel.visible ? statusLabel.width : 0)
+        - root.spacing * (statusLabel.visible ? 4 : 3))
       text: root.group && root.group.headsign !== "" ? root.group.headsign : "Departures"
       textFormat: Text.PlainText
       color: root.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       elide: Text.ElideRight
+    }
+
+    // Live prediction status ("Delayed", "Approaching", …) when the API
+    // reports one for the next departure; schedules leave it blank.
+    Text {
+      id: statusLabel
+      readonly property string value: root.group && root.group.times
+        && root.group.times.length > 0 ? String(root.group.times[0].status || "") : ""
+      visible: value !== ""
+      width: Math.min(implicitWidth, Style.space(90))
+      text: value
+      textFormat: Text.PlainText
+      elide: Text.ElideRight
+      color: Qt.alpha(root.foreground, 0.55)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      font.italic: true
+      anchors.verticalCenter: parent.verticalCenter
     }
 
     Item {
@@ -100,8 +129,7 @@ Item {
 
         Text {
           anchors.centerIn: parent
-          text: root.group && root.group.times.length && root.nowMs > 0
-            ? Mbta.countdownLabel(root.group.times[0].ms - root.nowMs) : ""
+          text: primaryLabel
           color: root.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
@@ -167,5 +195,10 @@ Item {
     onEntered: root.hoverStateChanged(root.group, true)
     onExited: root.hoverStateChanged(root.group, false)
     onClicked: root.activated()
+
+    Accessible.role: Accessible.Button
+    Accessible.name: root.accessibleText
+    Accessible.selected: root.selected
+    Accessible.onPressAction: root.activated()
   }
 }

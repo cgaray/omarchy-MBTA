@@ -175,8 +175,14 @@ function parseVehicles(payload, orderedStops) {
     if (status === "STOPPED_AT") {
       fraction = count === 1 ? 0 : seq / (count - 1)
     } else if (status === "INCOMING_AT" || status === "IN_TRANSIT_TO") {
-      var base = Math.max(0, seq - 1)
-      fraction = count === 1 ? 0 : (base + 0.5) / (count - 1)
+      // A train approaching the first terminal sits at/before stop 0, not
+      // halfway between stops 0 and 1.
+      if (seq === 0) {
+        fraction = 0
+      } else {
+        var base = seq - 1
+        fraction = count === 1 ? 0 : (base + 0.5) / (count - 1)
+      }
     } else {
       continue
     }
@@ -205,14 +211,23 @@ function parseVehicles(payload, orderedStops) {
 }
 
 // included[] → { route: {id: obj}, trip: {id: obj}, stop: {id: obj} }
+// The outer index is itself a null-prototype dictionary: payloads are
+// untrusted input, and an object literal here would let an included entry
+// with type "__proto__" (or "constructor", …) resolve through inherited
+// properties and write attacker-controlled keys onto Object.prototype —
+// prototype pollution in the shared QML JS runtime.
 function indexIncluded(included) {
-  var index = { route: dictionary(), trip: dictionary(), stop: dictionary() }
+  var index = dictionary()
+  index.route = dictionary()
+  index.trip = dictionary()
+  index.stop = dictionary()
   var list = boundedList(included, 3000)
   for (var i = 0; i < list.length; i++) {
     var entry = list[i]
     if (!entry || !entry.id || !entry.type) continue
-    if (!index[entry.type]) continue
-    index[entry.type][entry.id] = entry
+    var bucket = index[String(entry.type)]
+    if (!bucket) continue
+    bucket[String(entry.id)] = entry
   }
   return index
 }
@@ -416,7 +431,10 @@ function buildBoard(rows, stopIndex, configuredIds, nowMs, cap) {
         status: row.status
       })
     } else {
-      overflow[key] = (overflow[key] || 0) + 1
+      // Overflow is counted per stop+group: two configured stops can share a
+      // route/direction/headsign key, and their hidden counts must not pool.
+      var overflowKey = stopId + "|" + key
+      overflow[overflowKey] = (overflow[overflowKey] || 0) + 1
     }
   }
 
@@ -432,7 +450,7 @@ function buildBoard(rows, stopIndex, configuredIds, nowMs, cap) {
       return at - bt
     })
     for (var k = 0; k < stopGroups.length; k++) {
-      stopGroups[k].more = overflow[stopGroups[k].key] || 0
+      stopGroups[k].more = overflow[stopId + "|" + stopGroups[k].key] || 0
       if (stopGroups[k].times.length) {
         // Bar label wants the soonest departure across every configured stop,
         // not merely the first stop that happens to have service.
@@ -486,6 +504,19 @@ function pinnedNextLabel(board, pinKey, nowMs) {
 function stopNameFor(id, parentNames) {
   if (parentNames && parentNames[id]) return parentNames[id]
   return id
+}
+
+// The bar pill's countdown: the pinned line's next departure while its group
+// is on the board, otherwise the soonest departure anywhere. A pin whose trip
+// has ended must degrade to the global next label, never blank the pill.
+// Returns { label, pinned } so callers can word tooltips accurately.
+function barCountdown(board, pinKey, nowMs) {
+  var pinned = pinnedNextLabel(board, pinKey, nowMs)
+  if (pinned !== "") return { label: pinned, pinned: true }
+  return {
+    label: board && !isNaN(board.nextMs) ? countdownLabel(board.nextMs - nowMs) : "",
+    pinned: false
+  }
 }
 
 // MBTA service days run past midnight using 24:xx..27:xx clock values.
@@ -741,6 +772,7 @@ if (typeof module !== "undefined") {
     buildBoard: buildBoard,
     linePinKey: linePinKey,
     pinnedNextLabel: pinnedNextLabel,
+    barCountdown: barCountdown,
     scheduleWindow: scheduleWindow,
     dedupeStops: dedupeStops,
     filterStations: filterStations,

@@ -29,9 +29,16 @@ BarWidget {
     helper: root.fetchHelper
   }
 
-  QtObject { id: stationsOwner }
-  QtObject { id: geocodeOwner }
-  QtObject { id: nearbyOwner }
+  // Station discovery (picker cache + name/nearby flows) lives in its own
+  // nonvisual seam; Panel reaches it through `finder`.
+  StationFinder {
+    id: stationFinder
+    requests: requests
+    api: root.api
+  }
+  readonly property var finder: stationFinder
+
+  // ---- Panel lifecycle plumbing (shape contract for summon/hide routing).
 
   QtObject {
     id: settingsOwnerAdapter
@@ -57,6 +64,7 @@ BarWidget {
   readonly property real lastRefreshStartedMs: arrivalFeed.lastRefreshStartedMs
   readonly property real nowMs: arrivalFeed.nowMs
   readonly property string nextLabel: arrivalFeed.nextLabel
+  readonly property bool nextLabelPinned: arrivalFeed.nextLabelPinned
   readonly property bool hasData: arrivalFeed.hasData
 
   function refreshIfStale() { arrivalFeed.refreshIfStale() }
@@ -65,6 +73,7 @@ BarWidget {
   ArrivalFeed {
     id: arrivalFeed
     requests: requests
+    api: root.api
     configuredStopIds: root.configuredStopIds
     refreshSec: root.refreshSec
     perGroupCap: root.perGroupCap
@@ -72,19 +81,8 @@ BarWidget {
     pinnedLineKey: root.pinnedLineKey
   }
 
-  // Station picker cache (full system station list, fetched once per session).
-  property var stationsCache: null
-  property bool stationsLoading: false
-  property real stationsLastAttemptMs: 0
-
-  // ---- Nearby-station state
-  // Nearby searches always use coordinates or an address supplied by the user.
-  property var lastOrigin: null
-  property var nearbyResults: []
-  property bool nearbyLoading: false
-  property bool locating: false
-  property string nearbyError: ""
-  property real pendingRadiusKm: 1
+  // Station picker cache and nearby-search state moved to StationFinder.qml;
+  // Panel reaches them through `finder`.
 
   // Compatibility surface while Panel remains hosted by the bar widget.
   readonly property string activeLineKey: routeExplorer.activeLineKey
@@ -101,79 +99,9 @@ BarWidget {
   RouteExplorer {
     id: routeExplorer
     requests: requests
+    api: root.api
     board: root.board
     activityMode: panelLoader.item ? panelLoader.item.activity.mode : "hidden"
-  }
-
-  function ensureStations() {
-    if (root.stationsCache !== null || root.stationsLoading) return
-    if (root.stationsLastAttemptMs > 0 && Date.now() - root.stationsLastAttemptMs < 600000) return
-    root.stationsLastAttemptMs = Date.now()
-    root.stationsLoading = true
-    requests.request(stationsOwner, root.api.stations(), requests.interactive, function(outcome) {
-      root.stationsLoading = false
-      if (outcome.status === "ok") root.stationsCache = outcome.value
-      else console.warn("[mbta] station list unavailable:", outcome.error.kind)
-    })
-  }
-
-
-  function searchStations(query) {
-    var q = String(query || "").replace(/^\s+|\s+$/g, "")
-    if (q === "" || root.stationsCache === null) return []
-    // 16 keeps word-start matches visible when a street name prefixes many
-    // stops ("Appleton St @ …") without drowning the list.
-    return Mbta.filterStations(root.stationsCache, q, 16)
-  }
-
-  // ---- Nearby-station flows. Both entry points converge on fetchNearby.
-  function findNearby(addressText, radiusKm) {
-    root.nearbyError = ""
-    var coords = Mbta.parseLatLon(addressText)
-    if (coords) {
-      fetchNearby(coords.latitude, coords.longitude, radiusKm, "coordinates")
-      return true
-    }
-    var query = String(addressText || "").slice(0, 200).replace(/^\s+|\s+$/g, "")
-    if (query === "") {
-      root.nearbyError = "Enter your location"
-      return false
-    }
-    if (root.locating) return false
-    var request = root.api.geocode(query)
-    root.pendingRadiusKm = radiusKm
-    root.locating = true
-    return requests.request(geocodeOwner, request, requests.interactive, function(outcome) {
-      root.locating = false
-      if (outcome.status !== "ok" || !outcome.value.length) {
-        root.nearbyError = "Address not found"
-        return
-      }
-      var hit = outcome.value[0]
-      root.fetchNearby(hit.latitude, hit.longitude, root.pendingRadiusKm, hit.name)
-    }) > 0
-  }
-
-  function fetchNearby(latitude, longitude, radiusKm, sourceLabel) {
-    if (root.nearbyLoading) return
-    root.lastOrigin = {
-      latitude: latitude,
-      longitude: longitude,
-      source: String(sourceLabel || "location")
-    }
-    var request = root.api.nearby(latitude, longitude, radiusKm)
-    root.nearbyLoading = true
-    requests.request(nearbyOwner, request, requests.interactive, function(outcome) {
-      root.nearbyLoading = false
-      if (outcome.status !== "ok") {
-        root.nearbyResults = []
-        root.nearbyError = outcome.error.kind === "rate-limited"
-          ? "MBTA rate limit reached; retry shortly" : "MBTA request failed"
-        return
-      }
-      root.nearbyResults = outcome.value
-      root.nearbyError = root.nearbyResults.length ? "" : "No stations found in that radius"
-    })
   }
 
   function readSetting(name, fallback) { return settingsAdapter.value(name, fallback) }
@@ -281,8 +209,10 @@ BarWidget {
           var stop = root.board.stops[i]
           var lines = []
           for (var g = 0; g < stop.groups.length; g++) {
-            var group = stop.groups[g]
-            lines.push(group.badge.label + (group.headsign ? " → " + group.headsign : "") + ": " + group.times.map(function(t) { return t.label }).join(" "))
+          var group = stop.groups[g]
+          // Recompute at call time; stored labels go stale between fetches.
+          var labels = group.times.map(function(t) { return Mbta.countdownLabel(t.ms - Date.now()) })
+          lines.push(group.badge.label + (group.headsign ? " → " + group.headsign : "") + ": " + labels.join(" "))
           }
           stops.push({ stop: stop.name, id: stop.id, lines: lines })
         }
@@ -305,7 +235,7 @@ BarWidget {
     labelVisible: false
     hasVisualContent: true
     tooltipText: root.hasData
-      ? "MBTA — " + (root.pinnedLineKey !== "" ? "pinned departure " : "next departure ") + root.nextLabel + ", click for arrivals"
+      ? "MBTA — " + (root.nextLabelPinned ? "pinned departure " : "next departure ") + root.nextLabel + ", click for arrivals"
       : "MBTA — no live departures"
 
     onPressed: function(b) {

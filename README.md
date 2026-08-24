@@ -20,14 +20,15 @@ omarchy plugin add https://github.com/cgaray/omarchy-MBTA.git --enable
   a refresh.
 - **Click the pill** to open the board: departures grouped per station and
   route/direction. Selecting a row opens a scrollable stop-order strip with
-  live vehicle markers.
+  live vehicle markers; tap a marker for that vehicle's label and position.
 - **Pin** in the line pane makes that station and destination feed the bar
   countdown until it is unpinned.
 - **Manage stations** opens the picker:
   - *By name* — search every station in the system ("Davis", "North Station").
   - *Near address* — type your address, place, or raw `lat,lon`, set a radius in
-    km, and hit **Find**. The location is saved for future sessions;
-    **⌖ Saved location** reuses it without retyping.
+    km, and hit **Find**. When several places match the name, candidates are
+    listed so you can pick the right one. The location is saved for future
+    sessions; **⌖ Saved location** reuses it without retyping.
 - Selected stations persist in shell.json (per-widget settings) and survive
   restarts.
 

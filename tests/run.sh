@@ -34,7 +34,7 @@ if command -v qmllint >/dev/null 2>&1 && [ -n "${OMARCHY_PATH:-}" ]; then
   # declarations crashes this qmllint (exit 255, no diagnostics) — the same
   # first-party limitation arcade's suite documents. contract-test.sh covers
   # the widget's runtime shape instead.
-  for f in Panel.qml ArrivalFeed.qml BoundedRequest.qml RouteExplorer.qml ArrivalRow.qml RouteBadge.qml StationResultRow.qml; do
+  for f in Panel.qml ArrivalFeed.qml BoundedRequest.qml RouteExplorer.qml ArrivalRow.qml RouteBadge.qml StationResultRow.qml StationFinder.qml StripMap.qml PanelSession.qml MbtaSettings.qml; do
     if qmllint -I "$OMARCHY_PATH/shell" "$DIR/../$f"; then
       echo "  ok  $f"
     else

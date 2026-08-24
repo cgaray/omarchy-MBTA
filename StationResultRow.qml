@@ -72,5 +72,13 @@ Rectangle {
     hoverEnabled: true
     onEntered: root.hoveredRow(root.at)
     onClicked: root.pick(root.at)
+
+    Accessible.role: Accessible.Button
+    Accessible.name: (root.station ? root.station.name
+        + (root.station.municipality !== "" && root.station.municipality !== root.station.name
+          ? ", " + root.station.municipality : "") : "")
+      + (distanceText !== "" ? ", " + distanceText : "")
+      + (picked ? ", added" : "")
+    Accessible.onPressAction: root.pick(root.at)
   }
 }

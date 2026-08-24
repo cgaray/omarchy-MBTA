@@ -14,7 +14,7 @@ Item {
 
   readonly property var configuredStopIds: Mbta.parseStopIds(value("stopIds", Mbta.serializeStopIds(Mbta.DEFAULT_STOP_IDS)))
   readonly property int refreshSec: boundedInteger(value("refreshSec", 60), 60, 60, 300)
-  readonly property int perGroupCap: boundedInteger(value("perGroupCap", 3), 3, 1, 6)
+  readonly property int perGroupCap: boundedInteger(value("perGroupCap", 3), 3, 1, 3)
   readonly property bool scheduleFallback: value("scheduleFallback", true) !== false
   readonly property string pinnedLineKey: String(value("pinnedLine", "") || "").slice(0, 300)
   readonly property string pickerMode: normalizePickerMode(value("pickerMode", "name"))
@@ -48,7 +48,7 @@ Item {
     switch (name) {
     case "stopIds": return Mbta.serializeStopIds(Mbta.parseStopIds(raw))
     case "refreshSec": return root.boundedInteger(raw, 60, 60, 300)
-    case "perGroupCap": return root.boundedInteger(raw, 3, 1, 6)
+    case "perGroupCap": return root.boundedInteger(raw, 3, 1, 3)
     case "scheduleFallback": return raw !== false
     case "pinnedLine": return String(raw || "").slice(0, 300)
     case "pickerMode": return root.normalizePickerMode(raw)
@@ -61,9 +61,15 @@ Item {
   function update(patch) {
     var entry = Mbta.dictionary()
     var key
+    // Own properties only: for..in walks the prototype chain, and a polluted
+    // Object.prototype must never be swept into the persisted settings entry.
     for (key in root.source)
-      if (key !== "id") entry[key] = root.source[key]
-    for (key in patch) entry[key] = root.normalize(key, patch[key])
+      if (key !== "id" && Object.prototype.hasOwnProperty.call(root.source, key))
+        entry[key] = root.source[key]
+    for (key in patch) {
+      if (!Object.prototype.hasOwnProperty.call(patch, key)) continue
+      entry[key] = root.normalize(key, patch[key])
+    }
 
     // The owner applies this synchronously before shell.json echoes it back.
     root.ownerAdapter.applySettingsEntry(entry)

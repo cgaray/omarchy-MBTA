@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import fcntl
 import json
 import os
@@ -28,7 +29,16 @@ def update_rate_state(mutator):
         flags |= os.O_NOFOLLOW
     try:
         fd = os.open(path, flags, 0o600)
-    except OSError:
+    except OSError as error:
+        # A missing or unwritable runtime directory (containers, sandboxes,
+        # unusual PAM setups) is an environment gap, not abuse: degrade to
+        # per-process limiting — the QML-side coordinator already keeps its
+        # own cadence under the API budget — instead of blocking every MBTA
+        # request forever. Symlinks and tampered files still fail closed via
+        # the ownership checks below.
+        if error.errno in (errno.ENOENT, errno.ENOTDIR, errno.EACCES,
+                           errno.EPERM, errno.EROFS):
+            return "uncoordinated"
         return None
     try:
         info = os.fstat(fd)
@@ -70,11 +80,13 @@ def reserve_mbta_request(timeout):
         state["timestamps"] = timestamps[-MBTA_RATE_LIMIT:]
         return max(0, delay)
 
-    delay = update_rate_state(reserve)
-    if delay is None:
+    outcome = update_rate_state(reserve)
+    if outcome is None:
         return False
-    if delay > 0:
-        time.sleep(delay)
+    if outcome == "uncoordinated":
+        return True
+    if outcome > 0:
+        time.sleep(outcome)
     return True
 
 
@@ -100,8 +112,11 @@ class NoRedirects(urllib.request.HTTPRedirectHandler):
 def main():
     if len(sys.argv) != 4:
         return 2
-    limit = int(sys.argv[1])
-    timeout = int(sys.argv[2])
+    try:
+        limit = int(sys.argv[1])
+        timeout = int(sys.argv[2])
+    except ValueError:
+        return 2
     url = sys.argv[3]
     parsed = urllib.parse.urlsplit(url)
     if not 1 <= limit <= 4_194_304 or not 1 <= timeout <= 20:

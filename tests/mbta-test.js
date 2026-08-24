@@ -146,6 +146,27 @@ var cases = [
     assert.deepStrictEqual(Object.keys(index.trip), [])
   }],
 
+  ["indexIncluded resists prototype pollution from API-controlled types and ids", function() {
+    var index = Mbta.indexIncluded([
+      { id: "polluted", type: "__proto__", attributes: { name: "evil" } },
+      { id: "constructor", type: "constructor", attributes: {} },
+      { id: "toString", type: "stop", attributes: { name: "evil stop" } },
+      includedStop("70077", "Downtown Crossing", "place-dwnxg")
+    ])
+    // Neither the outer index nor Object.prototype gained attacker keys.
+    assert.strictEqual(index["__proto__"], undefined)
+    assert.strictEqual(Object.prototype.polluted, undefined)
+    assert.strictEqual(({}).polluted, undefined)
+    assert.strictEqual(({}).evil, undefined)
+    // An id like "toString" becomes an own property of the null-prototype
+    // bucket — shadowing, never corrupting, inherited members.
+    assert.ok(Object.prototype.hasOwnProperty.call(index.stop, "toString"))
+    assert.strictEqual(index.stop["70077"].attributes.name, "Downtown Crossing")
+    // Unknown types still land nowhere.
+    assert.deepStrictEqual(Object.keys(index.route), [])
+    assert.deepStrictEqual(Object.keys(index.trip), [])
+  }],
+
   ["readableTextColor flips to dark on light badges", function() {
     assert.strictEqual(Mbta.readableTextColor("FFC72C"), "1B1B1B")
     assert.strictEqual(Mbta.readableTextColor("DA291C"), "FFFFFF")
@@ -276,6 +297,30 @@ var cases = [
     assert.strictEqual(board.stops[0].groups[0].more, 2)
   }],
 
+  ["buildBoard counts overflow per stop when stops share a group key", function() {
+    // Two configured stations served by the same route/direction/headsign
+    // (e.g. a bus along one corridor): their hidden-departure counts must
+    // not pool into one "+N" chip.
+    var index = Mbta.indexIncluded([
+      includedStop("70077", "Downtown Crossing", "place-dwnxg"),
+      includedStop("70075", "Park Street", "place-pktrm"),
+      includedRoute("Red", { short_name: "", long_name: "Red Line", color: "DA291C", type: 1 })
+    ])
+    var data = []
+    for (var i = 1; i <= 8; i++) {
+      data.push(prediction("d" + i, { route: "Red", stop: "70077", arrival: iso(i * 5), direction: 0 }))
+      data.push(prediction("p" + i, { route: "Red", stop: "70075", arrival: iso(i * 6), direction: 0 }))
+    }
+    var rows = Mbta.collectRows({ data: data }, NOW, true)
+    var board = Mbta.buildBoard(rows, index, ["place-dwnxg", "place-pktrm"], NOW, 3)
+    assert.strictEqual(board.stops[0].id, "place-dwnxg")
+    assert.strictEqual(board.stops[0].groups.length, 1)
+    assert.strictEqual(board.stops[0].groups[0].times.length, 3)
+    assert.strictEqual(board.stops[0].groups[0].more, 5)
+    assert.strictEqual(board.stops[1].groups[0].times.length, 3)
+    assert.strictEqual(board.stops[1].groups[0].more, 5)
+  }],
+
   ["buildBoard separates opposite directions of one route", function() {
     var index = Mbta.indexIncluded([
       includedStop("70077", "Downtown Crossing", "place-dwnxg"),
@@ -330,6 +375,27 @@ var cases = [
     assert.strictEqual(Mbta.pinnedNextLabel(board, pin, NOW + 5 * 60000), "2m")
     assert.strictEqual(Mbta.pinnedNextLabel(board, "place-b|Red|1|Alewife"), "2m")
     assert.strictEqual(Mbta.pinnedNextLabel(board, "missing"), "")
+  }],
+
+  ["barCountdown falls back to the global next label when a pin is dead", function() {
+    var board = {
+      nextMs: NOW + 3 * 60000,
+      stops: [
+        { id: "place-a", groups: [
+          { stopId: "place-a", key: "Red|0|Ashmont", times: [{ ms: NOW + 4 * 60000 }] }
+        ] }
+      ]
+    }
+    var livePin = "place-a|Red|0|Ashmont"
+
+    // Live pin wins and reports itself as pinned.
+    assert.deepStrictEqual(Mbta.barCountdown(board, livePin, NOW), { label: "4m", pinned: true })
+    // Unpinned: global next.
+    assert.deepStrictEqual(Mbta.barCountdown(board, "", NOW), { label: "3m", pinned: false })
+    // Dead pin (trip ended, service gap): global next, never blank.
+    assert.deepStrictEqual(Mbta.barCountdown(board, "place-a|Red|9|Gone", NOW), { label: "3m", pinned: false })
+    // No board at all: empty label.
+    assert.deepStrictEqual(Mbta.barCountdown(null, livePin, NOW), { label: "", pinned: false })
   }],
 
   ["scheduleWindow covers two hours through the schedule cache lifetime", function() {
@@ -597,6 +663,18 @@ var cases = [
     // Sorted by position along the line.
     for (var i = 1; i < vehicles.length; i++)
       assert.ok(vehicles[i - 1].fraction <= vehicles[i].fraction)
+  }],
+
+  ["parseVehicles pins a train approaching the first terminal at stop 0", function() {
+    var stops = [{ id: "a", name: "Alewife" }, { id: "b", name: "Davis" }]
+    var vehicles = Mbta.parseVehicles({
+      data: [
+        { id: "v1", attributes: { current_status: "INCOMING_AT" }, relationships: { stop: { data: { id: "a" } }, trip: { data: { id: "t1" } } } }
+      ],
+      included: []
+    }, stops)
+    assert.strictEqual(vehicles.length, 1)
+    assert.strictEqual(vehicles[0].fraction, 0)
   }],
 
   ["parseVehicles dedupes per trip and survives empty payloads", function() {

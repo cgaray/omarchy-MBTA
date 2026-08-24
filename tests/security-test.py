@@ -42,6 +42,11 @@ def main():
         result = run([str(FETCH), "1024", "1", url])
         require(result.returncode == 2, f"unsafe URL was not rejected before I/O: {url}")
 
+    for argv in (["abc", "1"], ["1024", "abc"]):
+        result = run([str(FETCH), *argv, "https://api-v3.mbta.com/predictions"])
+        require(result.returncode == 2,
+                f"non-numeric bounds must exit 2 without a traceback: {argv}")
+
     fetch_module = load_fetch_module()
     with tempfile.TemporaryDirectory() as directory:
         previous_runtime = os.environ.get("XDG_RUNTIME_DIR")
@@ -52,6 +57,21 @@ def main():
             for _ in range(11):
                 require(fetch_module.reserve_mbta_request(20),
                         "normal line browsing should fit inside the local MBTA budget")
+        finally:
+            if previous_runtime is None:
+                os.environ.pop("XDG_RUNTIME_DIR", None)
+            else:
+                os.environ["XDG_RUNTIME_DIR"] = previous_runtime
+
+    with tempfile.TemporaryDirectory() as directory:
+        previous_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        # A missing runtime directory (containers, sandboxes) must degrade to
+        # uncoordinated limiting, not block every MBTA request forever.
+        missing_runtime = str(pathlib.Path(directory) / "absent")
+        os.environ["XDG_RUNTIME_DIR"] = missing_runtime
+        try:
+            require(fetch_module.reserve_mbta_request(20),
+                    "an unusable runtime dir should degrade instead of blocking")
         finally:
             if previous_runtime is None:
                 os.environ.pop("XDG_RUNTIME_DIR", None)

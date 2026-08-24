@@ -17,7 +17,9 @@ Item {
   property int perGroupCap: 3
   property bool scheduleFallback: true
   property string pinnedLineKey: ""
-  readonly property var api: MbtaApi.create(Mbta)
+  // Injected by the host so all workflows share one descriptor seam; the
+  // default keeps the component usable standalone.
+  property var api: MbtaApi.create(Mbta)
 
   property var board: null
   property bool loading: false
@@ -26,9 +28,9 @@ Item {
   property real nowMs: Date.now()
   readonly property bool stale: lastUpdated.getTime() <= 0
     || nowMs - lastUpdated.getTime() >= refreshSec * 1000
-  readonly property string nextLabel: pinnedLineKey !== ""
-    ? Mbta.pinnedNextLabel(board, pinnedLineKey, nowMs)
-    : (board && !isNaN(board.nextMs) ? Mbta.countdownLabel(board.nextMs - nowMs) : "")
+  readonly property var barCountdown: Mbta.barCountdown(board, pinnedLineKey, nowMs)
+  readonly property string nextLabel: barCountdown.label
+  readonly property bool nextLabelPinned: barCountdown.pinned
   readonly property bool hasData: board !== null && nextLabel !== ""
 
   property var lastRows: []

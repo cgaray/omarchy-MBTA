@@ -17,6 +17,18 @@ Item {
   implicitHeight: Math.min(maxViewportHeight, resultsColumn.implicitHeight)
   height: implicitHeight
 
+  onSelectedIndexChanged: scrollToSelected()
+
+  // Keyboard selection must stay visible; matches the column's row+spacing.
+  function scrollToSelected() {
+    if (selectedIndex < 0) return
+    var step = Style.space(24) + 2
+    var top = selectedIndex * step
+    var bottom = top + step
+    if (top < viewport.contentY) viewport.contentY = top
+    else if (bottom > viewport.contentY + viewport.height) viewport.contentY = bottom - viewport.height
+  }
+
   Flickable {
     id: viewport
     anchors.fill: parent

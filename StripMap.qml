@@ -13,6 +13,22 @@ Item {
   property bool loading: false
   property string errorText: ""
   property color foreground: Color.foreground
+  property int activeVehicleIndex: -1
+  onVehiclesChanged: activeVehicleIndex = -1
+  onStopsChanged: activeVehicleIndex = -1
+
+  function stopNameFor(stopId) {
+    for (var i = 0; i < root.stops.length; i++)
+      if (String(root.stops[i].id) === String(stopId)) return String(root.stops[i].name)
+    return ""
+  }
+
+  function statusText(status) {
+    if (status === "STOPPED_AT") return "At stop"
+    if (status === "INCOMING_AT") return "Approaching"
+    if (status === "IN_TRANSIT_TO") return "Incoming at"
+    return "Live"
+  }
 
   readonly property color routeColor: routeColorHex.length === 6 ? ("#" + routeColorHex) : "#7C878E"
   readonly property real rowHeight: Style.space(34)
@@ -131,6 +147,8 @@ Item {
           model: root.errorText === "" ? root.vehicles : []
 
           Rectangle {
+            id: vehicleMarker
+            required property int index
             required property var modelData
             x: Style.space(7)
             y: root.rowHeight / 2 - height / 2 + modelData.fraction * Math.max(0, stripContent.height - root.rowHeight)
@@ -138,7 +156,7 @@ Item {
             height: width
             radius: width / 2
             color: root.routeColor
-            border.width: 2
+            border.width: root.activeVehicleIndex === index ? 3 : 2
             border.color: root.foreground
 
             Rectangle {
@@ -162,6 +180,70 @@ Item {
               font.pixelSize: Style.font.bodySmall
               font.bold: true
             }
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.activeVehicleIndex = root.activeVehicleIndex === vehicleMarker.index
+                ? -1 : vehicleMarker.index
+
+              Accessible.role: Accessible.Button
+              Accessible.name: (vehicleMarker.modelData.label !== "" ? vehicleMarker.modelData.label : "Vehicle")
+                + ", " + root.statusText(vehicleMarker.modelData.status) + " "
+                + root.stopNameFor(vehicleMarker.modelData.stopId)
+              Accessible.onPressAction: root.activeVehicleIndex = root.activeVehicleIndex === vehicleMarker.index
+                ? -1 : vehicleMarker.index
+            }
+          }
+        }
+
+        Rectangle {
+          id: vehicleBubble
+          readonly property bool shown: root.activeVehicleIndex >= 0
+            && root.activeVehicleIndex < root.vehicles.length
+          readonly property real markerY: shown
+            ? root.rowHeight / 2 - height / 2
+              + root.vehicles[root.activeVehicleIndex].fraction * Math.max(0, stripContent.height - root.rowHeight)
+            : 0
+          visible: shown
+          x: Style.space(34)
+          y: Math.max(Style.space(4), Math.min(stripContent.height - height - Style.space(4), markerY))
+          width: bubbleContent.implicitWidth + Style.space(16)
+          height: bubbleContent.implicitHeight + Style.space(10)
+          radius: Math.min(6, Style.cornerRadius)
+          color: Qt.alpha(root.routeColor, 0.18)
+          border.width: 1
+          border.color: root.routeColor
+
+          Column {
+            id: bubbleContent
+            anchors.centerIn: parent
+            spacing: 1
+
+            Text {
+              text: vehicleBubble.shown && root.vehicles[root.activeVehicleIndex].label !== ""
+                ? root.vehicles[root.activeVehicleIndex].label : (vehicleBubble.shown ? "Vehicle" : "")
+              textFormat: Text.PlainText
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            Text {
+              text: vehicleBubble.shown
+                ? root.statusText(root.vehicles[root.activeVehicleIndex].status) + " "
+                  + root.stopNameFor(root.vehicles[root.activeVehicleIndex].stopId) : ""
+              textFormat: Text.PlainText
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          MouseArea {
+            anchors.fill: parent
+            onClicked: root.activeVehicleIndex = -1
           }
         }
       }
