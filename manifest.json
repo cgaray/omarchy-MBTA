@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.cgaray.mbta",
   "name": "MBTA",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Christopher Garay",
   "license": "MIT",
   "description": "Live MBTA arrival times for your stations in the Omarchy bar — subway, Silver Line, bus, commuter rail, and ferry countdowns with a departure-board panel and station picker (search by name or scan around any address).",
@@ -58,10 +58,10 @@
         "type": "integer",
         "label": "Departures per line/direction row",
         "min": 1,
-        "max": 6,
+        "max": 3,
         "step": 1,
         "defaultValue": 3,
-        "description": "Countdown chips kept per route+direction grouping on the panel."
+        "description": "Countdown chips kept per route+direction grouping on the panel. Rows show three chips plus a \"+N\" overflow count."
       },
       {
         "key": "scheduleFallback",
